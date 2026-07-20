@@ -1,0 +1,7 @@
+# Built binaries
+/publish-version
+/dist/
+
+# Local env / secrets
+*.env
+.env

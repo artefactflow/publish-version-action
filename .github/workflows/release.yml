@@ -1,0 +1,186 @@
+name: Release
+
+# Publishes a release of the action: the container image it runs, the GitHub release, and the moving major tag consumers pin to.
+#
+# The tag trigger is deliberately commented out while the action is still being built, so no accidental push can publish. Enable it by uncommenting the `push:` block below; until then the workflow only ever runs when someone starts it by hand.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to publish, for example v1.0.0. Create and push the tag first.'
+        required: true
+        type: string
+      dry-run:
+        description: 'Build everything but publish nothing.'
+        required: false
+        type: boolean
+        default: true
+  # push:
+  #   tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      major: ${{ steps.resolve.outputs.major }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Resolve the release tag
+        id: resolve
+        env:
+          # A dispatch supplies the tag as an input; a tag push carries it in the ref.
+          RAW_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if ! printf '%s' "$RAW_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::'$RAW_TAG' is not a v-prefixed SemVer tag (for example v1.2.3)"
+            exit 1
+          fi
+          echo "tag=$RAW_TAG" >> "$GITHUB_OUTPUT"
+          echo "major=${RAW_TAG%%.*}" >> "$GITHUB_OUTPUT"
+
+      # action.yml pins one exact image version, and that reference has to name the release being cut. Getting it wrong is silent and nasty: the release publishes, but every consumer of the new tag runs the previous version's image — or fails to pull an image that does not exist.
+      - name: Check the image reference matches the release
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          python3 - <<'PY'
+          import os, re, sys, yaml
+
+          tag = os.environ["TAG"]
+          version = tag.lstrip("v")
+          image = (yaml.safe_load(open("action.yml"))["runs"] or {}).get("image", "")
+
+          if image == "Dockerfile":
+              # Only legitimate before the first image exists: the action builds on the runner.
+              print(f"::notice::action.yml still builds from the Dockerfile. That is expected for the first release; switch it to docker://…:{version} afterwards.")
+              sys.exit(0)
+
+          match = re.fullmatch(r"docker://.+:(?P<tag>[^:]+)", image)
+          if not match:
+              print(f"::error::action.yml `runs.image` is {image!r}, which is neither 'Dockerfile' nor a docker:// reference with an explicit tag")
+              sys.exit(1)
+
+          referenced = match.group("tag")
+          if referenced in {"latest"} or re.fullmatch(r"\d+(\.\d+)?", referenced):
+              print(f"::error::action.yml references the floating image tag ':{referenced}'. Pin the exact version ':{version}' so a pinned ref keeps running the code it was pinned to.")
+              sys.exit(1)
+          if referenced != version:
+              print(f"::error::action.yml references image ':{referenced}' but the release is {tag}. Update the reference to ':{version}' and re-tag.")
+              sys.exit(1)
+
+          print(f"action.yml correctly references :{version}")
+          PY
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # The release path repeats the CI gates rather than trusting that CI ran on this commit — a tag can point anywhere.
+      - name: Test
+        run: go test -race ./...
+
+  image:
+    name: Build and push image
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: ${{ !inputs.dry-run }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ needs.verify.outputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.verify.outputs.tag }}
+            type=semver,pattern={{major}},value=${{ needs.verify.outputs.tag }}
+            # A pre-release must not become what an untagged `docker pull` hands out, and re-publishing an older tag must not drag `latest` backwards.
+            type=raw,value=latest,enable=${{ !contains(needs.verify.outputs.tag, '-') }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # A container action only ever runs on a Linux runner, but arm64 runners are Linux too.
+          platforms: linux/amd64,linux/arm64
+          push: ${{ !inputs.dry-run }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ needs.verify.outputs.tag }}
+
+  release:
+    name: Publish release
+    needs: [verify, image]
+    if: ${{ !inputs.dry-run }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.verify.outputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; leaving it as it is."
+            exit 0
+          fi
+          gh release create "$TAG" --title "$TAG" --generate-notes
+
+      # Consumers pin to the major tag (`uses: artefactflow/publish-version-action@v1`) and expect it to follow the newest release, so it is repointed at each release. A pre-release must not move it.
+      - name: Move the major tag
+        env:
+          TAG: ${{ needs.verify.outputs.tag }}
+          MAJOR: ${{ needs.verify.outputs.major }}
+        run: |
+          case "$TAG" in
+            *-*)
+              echo "$TAG is a pre-release; leaving $MAJOR where it is."
+              exit 0
+              ;;
+          esac
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f -a "$MAJOR" -m "Track the newest $MAJOR release ($TAG)"
+          git push -f origin "refs/tags/$MAJOR"
+
+      - name: Marketplace reminder
+        run: |
+          echo "### Publish to the Marketplace" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Listing an action on the Marketplace is a manual step: open the release, choose **Edit**, and tick **Publish this Action to the GitHub Marketplace**. Only the first release needs it; later releases are listed automatically." >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,92 @@
+# Marketplace requires action.yml at the repository root, which is why this action lives in its own repository.
+name: 'ArtefactFlow Publish Version'
+description: 'Create a version of an ArtefactFlow artefact from your CI build metadata, and optionally upload that version''s vulnerabilities in the same step.'
+author: 'ArtefactFlow'
+
+branding:
+  icon: 'upload-cloud'
+  color: 'blue'
+
+# Every input can also be supplied as an ARTEFACTFLOW_-prefixed environment variable, so one job-level `env:` block can configure every step. A `with:` value always wins over the variable.
+#
+# No input declares a `default:`. The runner substitutes a declared default before the action runs, which would make the input non-empty and the environment variable unreachable; every default is applied by the action itself instead.
+inputs:
+  api-url:
+    description: 'Base URL of the ArtefactFlow API. Defaults to https://api.artefactflow.app; self-hosted operators override it. Environment variable: ARTEFACTFLOW_API_URL.'
+    required: false
+  client-id:
+    description: "A service account's client id — its 24-character hex id. Environment variable: ARTEFACTFLOW_CLIENT_ID."
+    required: true
+  client-secret:
+    description: "The service account's client secret. Pass it from a secret — never inline it in the workflow file. Environment variable: ARTEFACTFLOW_CLIENT_SECRET."
+    required: true
+  artefact-name:
+    description: 'The artefact name. Exact and case-sensitive, unique within your organisation, 2 to 128 characters of letters, digits, underscores, and hyphens. Environment variable: ARTEFACTFLOW_ARTEFACT_NAME.'
+    required: true
+  version:
+    description: 'The SemVer version to create, 4 to 50 characters, for example 1.2.3 — often the output of suggest-version-action. Environment variable: ARTEFACTFLOW_VERSION.'
+    required: true
+
+  commit-sha:
+    description: 'Commit the build was produced from, 7 to 64 hex characters. Defaults to the commit that triggered the workflow. Environment variable: ARTEFACTFLOW_COMMIT_SHA.'
+    required: false
+  branch:
+    description: 'Source branch the build came from. Defaults to the branch or tag that triggered the workflow. Environment variable: ARTEFACTFLOW_BRANCH.'
+    required: false
+  build-id:
+    description: 'Identifier of the build. Defaults to the workflow run id. Environment variable: ARTEFACTFLOW_BUILD_ID.'
+    required: false
+  pipeline-id:
+    description: 'Identifier of the pipeline. Defaults to the workflow run number. Environment variable: ARTEFACTFLOW_PIPELINE_ID.'
+    required: false
+  lifecycle:
+    description: 'Where the version sits in its life: pre-alpha, alpha, beta, release, or end-of-life. Environment variable: ARTEFACTFLOW_LIFECYCLE.'
+    required: false
+  build-state:
+    description: 'Outcome of the build: pending, building, success, failed, or cancelled. Environment variable: ARTEFACTFLOW_BUILD_STATE.'
+    required: false
+  is-default:
+    description: "Mark this version as the artefact's default, the one shown and resolved first. Defaults to true. Environment variable: ARTEFACTFLOW_IS_DEFAULT."
+    required: false
+  note:
+    description: 'Free-text note recorded on the version, such as a short release summary. At most 4096 characters. Environment variable: ARTEFACTFLOW_NOTE.'
+    required: false
+  bom-ref:
+    description: 'CycloneDX bom-ref identifying this version inside an SBOM document. Environment variable: ARTEFACTFLOW_BOM_REF.'
+    required: false
+  hash:
+    description: 'Content digests of the built artefact, one `alg:content` pair per line, for example `sha256:40436b8c...`. The algorithm must be one the API accepts (MD5, SHA-1, SHA-256, SHA-384, SHA-512, SHA3-*, BLAKE2b-*, BLAKE3) in any casing, and the digest 32 to 128 characters. Environment variable: ARTEFACTFLOW_HASH.'
+    required: false
+  properties:
+    description: 'Custom name/value pairs to record on the version, one `name=value` per line. Environment variable: ARTEFACTFLOW_PROPERTIES.'
+    required: false
+
+  upload-vulnerabilities:
+    description: "Upload the version's vulnerabilities after creating it. This replaces the version's complete recorded set, so the file must hold the scanner's entire list. Defaults to false. Environment variable: ARTEFACTFLOW_UPLOAD_VULNERABILITIES."
+    required: false
+  vulnerabilities-file:
+    description: 'Path to the vulnerability report to upload, in the ArtefactFlow vulnerabilities format. Required when upload-vulnerabilities is true. Environment variable: ARTEFACTFLOW_VULNERABILITIES_FILE.'
+    required: false
+
+  if-exists:
+    description: 'What to do when the version already exists: fail (default) reports an error, skip treats it as success and leaves the existing version untouched while still uploading vulnerabilities. Environment variable: ARTEFACTFLOW_IF_EXISTS.'
+    required: false
+
+outputs:
+  version:
+    description: 'The SemVer version that was published.'
+  version-url:
+    description: "API URL of the version. Taken from the create response's Location header, or derived from api-url when the API does not send one."
+  created:
+    description: 'true when this run created the version; false when it already existed and if-exists was skip.'
+  vulnerabilities-uploaded:
+    description: 'true when a vulnerability set was uploaded in this run.'
+
+runs:
+  using: 'docker'
+  # Built from source on the runner until the first release publishes an image. From then on this references one exact, immutable image version, which is bumped as part of cutting a release:
+  #
+  #   image: 'docker://ghcr.io/artefactflow/publish-version-action:1.2.3'
+  #
+  # Exact, not a floating `:1`. A consumer who pins `uses: ...@v1.2.0` or a commit SHA expects to keep running that code; a floating tag would silently hand them a newer image and make pinning meaningless. The release workflow refuses to publish if this reference and the release tag disagree.
+  image: 'Dockerfile'

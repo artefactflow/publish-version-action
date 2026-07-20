@@ -1,0 +1,8 @@
+# Keep the build context minimal and deterministic.
+.git
+.github
+docs
+examples
+*.md
+action.yml
+LICENSE
