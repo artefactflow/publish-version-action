@@ -15,10 +15,12 @@ func TestOutputs(t *testing.T) {
 	})
 
 	want := map[string]string{
-		"version":                  "1.4.2",
-		"version-url":              "https://api.artefactflow.app/v1/artefacts/0123456789abcdef01234567/versions/1.4.2",
-		"created":                  "true",
-		"vulnerabilities-uploaded": "false",
+		"version":                        "1.4.2",
+		"version-url":                    "https://api.artefactflow.app/v1/artefacts/0123456789abcdef01234567/versions/1.4.2",
+		"created":                        "true",
+		"vulnerabilities-uploaded":       "false",
+		"analyses-applied":               "0",
+		"converted-vulnerabilities-file": "",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %d outputs, want %d", len(got), len(want))

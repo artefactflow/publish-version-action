@@ -72,6 +72,8 @@ CI additionally runs a smoke test that executes the action end to end against a 
 - The vulnerability upload replaces the version's whole recorded set. Anything that could send a partial list is a data-loss bug, not a formatting one. Findings are validated against the typed model and then forwarded as the raw JSON they were read from — never re-encoded from the structs, which would drop any value Go treats as empty.
 - Everything knowable before a request is made is checked before the first one is: the report is read and validated during configuration, not between the two calls. A version must never be published only for the run to discover the report was unusable all along.
 - `internal/afclient/types.go` must model the vulnerability schema completely. Reports are decoded with unknown fields rejected, so a field the API accepts but the model omits turns a valid report into a hard failure.
+- Scanner reports (Trivy, Grype, CycloneDX) are converted in `internal/convert`. They are decoded *leniently* — a scanner carries far more than the action reads, and rejecting an unknown field would break on the next release — but the converted output is re-validated against the schema strictly before it is uploaded. Conversion is confident-or-fail: a report that cannot be fully mapped is an error naming the offending entry, never a partial upload, because the endpoint is a full replace. Converters build the typed model and re-encode it, so a rating's score is a pointer — a genuine `0.0` must not be dropped.
+- The converters are covered by golden fixtures under `internal/convert/testdata`. After a deliberate change to a mapping, regenerate them with `go test ./internal/convert -update` and review the diff — the golden *is* the specification of what a converter emits. The `scanner-drift` workflow re-runs the latest Trivy and Grype against a fixed target on a schedule, so a scanner changing its output shape fails there rather than in a consumer's pipeline.
 - The client secret and the minted token must never reach a log line, an error message, or an output. There are tests asserting this; keep them passing.
 - Every default is applied in `LoadConfig`, never as a `default:` in `action.yml` — the runner substitutes a declared default before the action runs, which would make the `ARTEFACTFLOW_` fallback dead code. CI fails a pull request that adds one.
 - Failures surface as `::error::` annotations with a non-zero exit, so they land on the run summary rather than only in the step log.
@@ -81,4 +83,29 @@ CI additionally runs a smoke test that executes the action end to end against a 
 
 ## Releasing
 
-Releases are cut by maintainers from the `Release` workflow. It builds and pushes the container image, creates the GitHub release, and repoints the moving major tag (`v1`) at it. Listing on the Marketplace is a manual step on the first release only.
+Releases are cut by maintainers from the `Release` workflow. It re-runs the tests from the tag, builds and pushes the multi-architecture image to GHCR, creates the GitHub release, and repoints the moving major tag (`v1`) at it — skipping that last step for pre-releases.
+
+`action.yml` references **one exact image version**, for example `docker://ghcr.io/artefactflow/publish-version-action:1.2.3`, and that reference is part of the release commit. A floating `:1` would be less work, but it would mean someone who pins `uses: ...@v1.2.0` or a commit SHA silently gets a newer image on your next release — pinning has to actually pin. The release workflow refuses to publish when the reference and the tag disagree.
+
+So each release is:
+
+1. Update `runs.image` in `action.yml` to the version being released, and commit.
+2. Tag that commit (`git tag v1.2.3`) and push the tag.
+3. Run the `Release` workflow against the tag, with **dry-run off**.
+
+Between steps 2 and 3 the tag exists but its image does not, so the action is briefly unusable at that ref. Nothing consumes a tag before its release exists, so this is safe — but do not leave the gap open longer than necessary.
+
+### The first release
+
+The first release is the exception: no image exists yet, so `action.yml` stays on `image: 'Dockerfile'` and the workflow emits a notice rather than failing. That release builds on the runner for anyone who uses it. Immediately afterwards:
+
+1. Confirm the package is **public** — GHCR packages are not reliably public just because the repository is, and a private image fails for every consumer with an unauthorized pull. Check under the organisation's Packages settings.
+2. Switch `action.yml` to `docker://ghcr.io/artefactflow/publish-version-action:<that version>` and cut the next release normally.
+
+Listing on the Marketplace is a manual step on the first release only: open the release, choose **Edit**, and tick **Publish this Action to the GitHub Marketplace**.
+
+### Why CI stages a copy of the action
+
+Because `action.yml` points at a published image, `uses: ./` in the smoke job would pull that image and test the last release rather than the pull request. The job therefore copies the action into `ci-local-action/` with the image reference rewritten to `Dockerfile`, and runs that. If you add a file the container build needs, add it to that copy step too.
+
+Note that the copy covers only what the **image build** needs (`go.mod`, `cmd`, `internal`, and the Dockerfile). A container action still runs with the repository root as its working directory, so a path passed to `vulnerabilities-file` resolves against the real checkout rather than the staged copy — which is why the smoke job can point at `examples/vulnerabilities.json` without it being copied.

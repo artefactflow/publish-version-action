@@ -3,13 +3,17 @@ package action
 
 import (
 	"fmt"
+	"net/url"
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/artefactflow/publish-version-action/internal/afclient"
+	"github.com/artefactflow/publish-version-action/internal/convert"
 )
 
 // DefaultAPIURL is the hosted ArtefactFlow API, used when neither the `api-url` input nor ARTEFACTFLOW_API_URL is set. Self-hosted operators override it; nothing else in the action assumes a particular instance.
@@ -48,8 +52,24 @@ type Config struct {
 	UploadVulnerabilities bool
 	// VulnerabilitiesFile is the report that was loaded, kept for log and error messages.
 	VulnerabilitiesFile string
-	// Vulnerabilities is the parsed report, read and validated here rather than after the version is created. Discovering a malformed report only once the version exists would leave the artefact half-published for a mistake that was knowable before any request was made.
+	// VulnerabilitiesFormat is the format override, empty for auto-detection. Kept for the log line.
+	VulnerabilitiesFormat convert.Format
+	// Vulnerabilities is the wire body: the report loaded (native) or converted (Trivy, Grype, CycloneDX) and, when a VEX file was supplied, overlaid with its assessments. It is prepared here rather than after the version is created — discovering a malformed report only once the version exists would leave the artefact half-published for a mistake that was knowable before any request was made.
 	Vulnerabilities afclient.VulnerabilitiesInput
+	// ConversionNotes are step-log lines a conversion produced, such as a truncated description or a scan that clears the recorded set.
+	ConversionNotes []string
+	// UnmatchedVEX names the VEX assessments that matched no converted finding, surfaced as a warning: it usually means the scan and the VEX are from different builds.
+	UnmatchedVEX []string
+
+	// VEXFile is the CycloneDX VEX document supplied alongside a scan (overlaid into the upload) or on its own (see ApplyVEXOnly).
+	VEXFile string
+	// ApplyVEXOnly selects the standalone VEX path: apply assessments to a version's already-recorded findings via PATCH, with no scan report and no version create.
+	ApplyVEXOnly bool
+	// VEXEntries are the parsed standalone assessments, validated here so a malformed VEX document fails before any is applied.
+	VEXEntries []convert.VEXEntry
+
+	// ConvertedOutputFile, when set, receives the native JSON that will be uploaded, so a workflow can inspect or archive it before it goes.
+	ConvertedOutputFile string
 }
 
 var (
@@ -155,6 +175,42 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		fail("input `properties`: %s", err)
 	}
 
+	references, err := parseReferences(input("external-references"))
+	if err != nil {
+		fail("input `external-references`: %s", err)
+	}
+
+	buildTimestamp := input("build-timestamp")
+	if buildTimestamp != "" {
+		if _, err := time.Parse(time.RFC3339, buildTimestamp); err != nil {
+			fail("input `build-timestamp` must be an RFC 3339 timestamp such as 2026-06-15T10:30:00Z, got %q", buildTimestamp)
+		}
+	}
+
+	// A PURL is a URI but not an http one (`pkg:docker/...`), so the check is that a scheme is present rather than that it is a web address.
+	purl := input("purl")
+	if purl != "" && !hasURIScheme(purl) {
+		fail("input `purl` must be a package URL such as pkg:docker/acme/payment-service@1.2.3, got %q", purl)
+	}
+	downloadURL := input("download-url")
+	if downloadURL != "" && !hasURIScheme(downloadURL) {
+		fail("input `download-url` must be an absolute URL, got %q", downloadURL)
+	}
+
+	cpe := input("cpe")
+	if n := utf8.RuneCountInString(cpe); n > 512 {
+		fail("input `cpe` must be at most 512 characters, got %d", n)
+	}
+	mimeType := input("mime-type")
+	if n := utf8.RuneCountInString(mimeType); n > 128 {
+		fail("input `mime-type` must be at most 128 characters, got %d", n)
+	}
+
+	size, err := parseSize(input("size"))
+	if err != nil {
+		fail("%s", err)
+	}
+
 	// The API accepts a fixed set of values here. Checking locally turns a 422 arriving mid-pipeline into a message that names the input and lists what it will take.
 	lifecycle := strings.ToLower(input("lifecycle"))
 	if lifecycle != "" && !slices.Contains(afclient.Lifecycles, lifecycle) {
@@ -182,28 +238,61 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		Builder:            Builder,
 		Note:               note,
 		BOMRef:             input("bom-ref"),
+		BuildTimestamp:     buildTimestamp,
+		PURL:               purl,
+		CPE:                cpe,
+		MimeType:           mimeType,
+		Size:               size,
+		DownloadURL:        downloadURL,
 		Hash:               hashes,
-		ExternalReferences: buildReferences(getenv),
+		ExternalReferences: withBuildReference(references, getenv),
 		Properties:         properties,
 	}
 
+	cfg.ApplyVEXOnly, err = parseBool("apply-vex-only", input("apply-vex-only"), false)
+	if err != nil {
+		fail("%s", err)
+	}
 	cfg.UploadVulnerabilities, err = parseBool("upload-vulnerabilities", input("upload-vulnerabilities"), false)
 	if err != nil {
 		fail("%s", err)
 	}
-	if cfg.UploadVulnerabilities {
-		cfg.VulnerabilitiesFile = input("vulnerabilities-file")
-		switch {
-		case cfg.VulnerabilitiesFile == "":
-			fail("input `vulnerabilities-file` is required when `upload-vulnerabilities` is true")
-		default:
-			// Read and validate the report up front. Leaving this until after the create would turn a typo in a JSON file into a version published without the vulnerabilities it was supposed to carry.
-			vulns, err := LoadVulnerabilities(cfg.VulnerabilitiesFile)
-			if err != nil {
-				fail("%s", err)
-			}
-			cfg.Vulnerabilities = vulns
+	cfg.VulnerabilitiesFile = input("vulnerabilities-file")
+	cfg.VEXFile = input("vex-file")
+	cfg.ConvertedOutputFile = input("converted-output-file")
+
+	formatOverride := strings.ToLower(input("vulnerabilities-format"))
+
+	// Everything the upload needs is read and validated here, before the version is created. A report that cannot be converted, or a VEX document with an unmappable value, has to fail before anything is published — a version created and then found to be un-uploadable is the half-published state the whole ordering exists to prevent.
+	switch {
+	case cfg.ApplyVEXOnly:
+		// Standalone VEX applies assessments to a version's already-recorded findings; it takes no scan and creates no version.
+		if cfg.UploadVulnerabilities || cfg.VulnerabilitiesFile != "" {
+			fail("`apply-vex-only` applies VEX to a version's already-recorded findings and takes no scan report; do not set `upload-vulnerabilities` or `vulnerabilities-file` with it")
 		}
+		if cfg.VEXFile == "" {
+			fail("input `vex-file` is required when `apply-vex-only` is true")
+		} else if entries, err := LoadVEXForApply(cfg.VEXFile); err != nil {
+			fail("%s", err)
+		} else {
+			cfg.VEXEntries = entries
+		}
+
+	case cfg.UploadVulnerabilities:
+		if cfg.VulnerabilitiesFile == "" {
+			fail("input `vulnerabilities-file` is required when `upload-vulnerabilities` is true")
+		} else if prepared, err := LoadAndConvert(cfg.VulnerabilitiesFile, formatOverride, cfg.VEXFile); err != nil {
+			fail("%s", err)
+		} else {
+			cfg.Vulnerabilities = prepared.Body
+			cfg.VulnerabilitiesFormat = prepared.Format
+			cfg.ConversionNotes = prepared.Notes
+			cfg.UnmatchedVEX = prepared.UnmatchedVEX
+		}
+
+	case cfg.VEXFile != "":
+		// A VEX file with nothing to attach it to is a misconfiguration worth naming rather than ignoring: it would otherwise be a triage decision that silently did nothing.
+		fail("input `vex-file` needs a scan to overlay onto: set `upload-vulnerabilities` with `vulnerabilities-file`, or set `apply-vex-only` to apply it on its own")
 	}
 
 	if len(problems) > 0 {
@@ -243,18 +332,74 @@ func validateArtefactName(name string) error {
 	return nil
 }
 
-// buildReferences records a link back to the workflow run that produced the version, so a version in ArtefactFlow always points at the build that made it. It is skipped outside a workflow run, where the pieces are not available.
-func buildReferences(getenv func(string) string) []afclient.Reference {
+// withBuildReference appends a link back to the workflow run that produced the version, so a version in ArtefactFlow always points at the build that made it.
+//
+// It is skipped outside a workflow run, where the pieces are not available, and skipped when the caller supplied a build-system reference of their own — a version carrying two contradictory answers to "which build made this?" is worse than one that trusts what the workflow said.
+func withBuildReference(refs []afclient.Reference, getenv func(string) string) []afclient.Reference {
+	for _, r := range refs {
+		if r.Type == afclient.ReferenceTypeBuildSystem {
+			return refs
+		}
+	}
 	server := firstNonEmpty(getenv("GITHUB_SERVER_URL"), "https://github.com")
 	repo, runID := getenv("GITHUB_REPOSITORY"), getenv("GITHUB_RUN_ID")
 	if repo == "" || runID == "" {
-		return nil
+		return refs
 	}
-	return []afclient.Reference{{
-		Type:    "build-system",
+	return append(refs, afclient.Reference{
+		Type:    afclient.ReferenceTypeBuildSystem,
 		URL:     fmt.Sprintf("%s/%s/actions/runs/%s", server, repo, runID),
 		Comment: "GitHub Actions workflow run",
-	}}
+	})
+}
+
+// parseReferences reads the `external-references` input: one reference per line as `<type> <url> [comment]`. Neither a type nor a URL can contain a space, so splitting on whitespace and treating everything after the second field as the comment reads naturally and leaves the comment free to be a sentence.
+func parseReferences(s string) ([]afclient.Reference, error) {
+	var out []afclient.Reference
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			return nil, fmt.Errorf("each line must be `type url [comment]`, got %q", line)
+		}
+		refType, refURL := strings.ToLower(fields[0]), fields[1]
+		if !slices.Contains(afclient.ReferenceTypes, refType) {
+			return nil, fmt.Errorf("unknown type %q; use one of %s", fields[0], strings.Join(afclient.ReferenceTypes, ", "))
+		}
+		if !hasURIScheme(refURL) {
+			return nil, fmt.Errorf("reference %q must have an absolute URL, got %q", refType, refURL)
+		}
+		comment := strings.Join(fields[2:], " ")
+		if n := utf8.RuneCountInString(comment); n > 500 {
+			return nil, fmt.Errorf("comment for %q must be at most 500 characters, got %d", refType, n)
+		}
+		out = append(out, afclient.Reference{Type: refType, URL: refURL, Comment: comment})
+	}
+	return out, nil
+}
+
+// parseSize reads the `size` input, the artefact's size in bytes.
+func parseSize(s string) (*int64, error) {
+	if s == "" {
+		return nil, nil
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("input `size` must be a whole number of bytes, got %q", s)
+	}
+	if n < 0 {
+		return nil, fmt.Errorf("input `size` cannot be negative, got %d", n)
+	}
+	return &n, nil
+}
+
+// hasURIScheme reports whether a value parses as a URI carrying a scheme. It deliberately does not require http(s): a package URL is `pkg:docker/...`, which is a perfectly good URI.
+func hasURIScheme(s string) bool {
+	u, err := url.Parse(s)
+	return err == nil && u.Scheme != "" && u.Opaque+u.Host+u.Path != ""
 }
 
 // parseHashes reads the `hash` input, which is a newline-separated list of `alg:content` pairs — for example `SHA-256:40436b8c...`. Splitting on the first colon keeps an algorithm name containing a dash intact and tolerates a content value that itself contains a colon.

@@ -1,0 +1,8 @@
+{
+  "format": "trivy",
+  "cleared": true,
+  "notes": [
+    "the trivy report contains no vulnerabilities; the upload will clear any findings previously recorded for this version"
+  ],
+  "findings": []
+}

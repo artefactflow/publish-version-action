@@ -123,7 +123,7 @@ jobs:
             type=semver,pattern={{version}},value=${{ needs.verify.outputs.tag }}
             type=semver,pattern={{major}}.{{minor}},value=${{ needs.verify.outputs.tag }}
             type=semver,pattern={{major}},value=${{ needs.verify.outputs.tag }}
-            # A pre-release must not become what an untagged `docker pull` hands out, and re-publishing an older tag must not drag `latest` backwards.
+            # A pre-release must not become `latest` — that tag is what someone lands on when they pull without thinking.
             type=raw,value=latest,enable=${{ !contains(needs.verify.outputs.tag, '-') }}
 
       - name: Build and push

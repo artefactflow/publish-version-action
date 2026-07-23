@@ -1,0 +1,53 @@
+{
+  "matches": [
+    {
+      "vulnerability": {
+        "id": "CVE-2023-44487",
+        "dataSource": "https://nvd.nist.gov/vuln/detail/CVE-2023-44487",
+        "namespace": "nvd:cpe",
+        "severity": "High",
+        "urls": ["https://nvd.nist.gov/vuln/detail/CVE-2023-44487"],
+        "description": "HTTP/2 Rapid Reset denial of service.",
+        "cvss": [
+          {
+            "source": "nvd@nist.gov",
+            "type": "Primary",
+            "version": "3.1",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+            "metrics": { "baseScore": 7.5 }
+          }
+        ],
+        "fix": { "versions": ["1.60.0"], "state": "fixed" }
+      },
+      "relatedVulnerabilities": [
+        { "id": "GHSA-qppj-fm5r-hxr3", "namespace": "github:language:javascript" }
+      ],
+      "artifact": {
+        "name": "nghttp2",
+        "version": "1.58.0",
+        "type": "apk",
+        "purl": "pkg:apk/alpine/nghttp2@1.58.0-r0?arch=x86_64"
+      }
+    },
+    {
+      "vulnerability": {
+        "id": "GHSA-xxxx-yyyy-zzzz",
+        "dataSource": "https://github.com/advisories/GHSA-xxxx-yyyy-zzzz",
+        "namespace": "github:language:go",
+        "severity": "Negligible",
+        "description": "A finding whose only severity is a scanner term with no CVSS vector."
+      },
+      "artifact": {
+        "name": "golang.org/x/text",
+        "version": "0.3.7",
+        "type": "go-module",
+        "purl": "pkg:golang/golang.org/x/text@0.3.7"
+      }
+    }
+  ],
+  "descriptor": {
+    "name": "grype",
+    "version": "0.74.7",
+    "db": { "built": "2024-05-01T01:23:45Z" }
+  }
+}

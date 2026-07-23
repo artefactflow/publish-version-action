@@ -60,12 +60,45 @@ inputs:
   properties:
     description: 'Custom name/value pairs to record on the version, one `name=value` per line. Environment variable: ARTEFACTFLOW_PROPERTIES.'
     required: false
+  external-references:
+    description: 'Typed links to record on the version, one `type url [comment]` per line, for example `release-notes https://example.com/releases/1.2.3 Release notes`. A link to this workflow run is added automatically unless you supply a build-system reference yourself. Environment variable: ARTEFACTFLOW_EXTERNAL_REFERENCES.'
+    required: false
+  build-timestamp:
+    description: 'When the build ran, as an RFC 3339 timestamp such as 2026-06-15T10:30:00Z. Distinct from when the version was recorded. Environment variable: ARTEFACTFLOW_BUILD_TIMESTAMP.'
+    required: false
+  purl:
+    description: 'Package URL identifying this version, for example pkg:docker/acme/payment-service@1.2.3. Environment variable: ARTEFACTFLOW_PURL.'
+    required: false
+  cpe:
+    description: 'CPE 2.3 identifier for this version, at most 512 characters. Environment variable: ARTEFACTFLOW_CPE.'
+    required: false
+  mime-type:
+    description: 'MIME type of the distributed artefact, for example application/x-tar. At most 128 characters. Environment variable: ARTEFACTFLOW_MIME_TYPE.'
+    required: false
+  size:
+    description: 'Size of the artefact in bytes, as a whole number. Environment variable: ARTEFACTFLOW_SIZE.'
+    required: false
+  download-url:
+    description: "Direct download URL for this version's artefact. Environment variable: ARTEFACTFLOW_DOWNLOAD_URL."
+    required: false
 
   upload-vulnerabilities:
     description: "Upload the version's vulnerabilities after creating it. This replaces the version's complete recorded set, so the file must hold the scanner's entire list. Defaults to false. Environment variable: ARTEFACTFLOW_UPLOAD_VULNERABILITIES."
     required: false
   vulnerabilities-file:
-    description: 'Path to the vulnerability report to upload, in the ArtefactFlow vulnerabilities format. Required when upload-vulnerabilities is true. Environment variable: ARTEFACTFLOW_VULNERABILITIES_FILE.'
+    description: 'Path to the vulnerability report to upload. A Trivy JSON, Grype JSON, CycloneDX, or native ArtefactFlow report is accepted; the format is detected automatically. Required when upload-vulnerabilities is true. Environment variable: ARTEFACTFLOW_VULNERABILITIES_FILE.'
+    required: false
+  vulnerabilities-format:
+    description: 'Override the report format instead of detecting it: native, trivy, grype, or cyclonedx. Leave unset to detect it from the document. A document that does not match the override is an error, not a silent fallback. Environment variable: ARTEFACTFLOW_VULNERABILITIES_FORMAT.'
+    required: false
+  vex-file:
+    description: 'Path to a CycloneDX VEX document whose assessments are attached to the findings. Supplied alongside a scan, it is merged into the same upload; supplied on its own with apply-vex-only, it triages an already-recorded set. Environment variable: ARTEFACTFLOW_VEX_FILE.'
+    required: false
+  apply-vex-only:
+    description: "Apply a VEX document's assessments to the version's already-recorded findings without re-scanning. No version is created and no scan is uploaded; only vex-file and the version being addressed are needed. Defaults to false. Environment variable: ARTEFACTFLOW_APPLY_VEX_ONLY."
+    required: false
+  converted-output-file:
+    description: 'Path to write the converted native JSON that will be uploaded, so a workflow can inspect or archive it. Written before the upload runs. Environment variable: ARTEFACTFLOW_CONVERTED_OUTPUT_FILE.'
     required: false
 
   if-exists:
@@ -81,6 +114,10 @@ outputs:
     description: 'true when this run created the version; false when it already existed and if-exists was skip.'
   vulnerabilities-uploaded:
     description: 'true when a vulnerability set was uploaded in this run.'
+  analyses-applied:
+    description: 'Number of VEX assessments applied on the standalone apply-vex-only path; 0 otherwise.'
+  converted-vulnerabilities-file:
+    description: 'Path the converted native JSON was written to, echoing converted-output-file when it was set; empty otherwise.'
 
 runs:
   using: 'docker'

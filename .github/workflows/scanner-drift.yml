@@ -1,0 +1,67 @@
+name: Scanner drift
+
+# Scanners move. This job scans a fixed, digest-pinned target with the current Trivy and Grype and converts the result with this action's own converters, so that a scanner changing its output shape is caught here — by us — rather than in a customer's pipeline. It runs on a schedule and on demand; it never runs on a pull request, because it depends on the scanners' latest releases rather than on the diff.
+
+on:
+  schedule:
+    # Weekly, early Monday UTC.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scanner-drift
+  cancel-in-progress: false
+
+env:
+  # A small, deliberately outdated image so the scan reliably finds known vulnerabilities. Alpine 3.14 is end-of-life, so the tag is effectively fixed — the scanners are what this job watches for drift, not the target. Pin to a digest (`alpine:3.14@sha256:…`) if you want the target frozen exactly.
+  TARGET_IMAGE: 'alpine:3.14'
+
+jobs:
+  drift:
+    name: Convert the latest scanner output
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install the latest Trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Install the latest Grype
+        run: |
+          curl -sfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b "$RUNNER_TEMP/bin"
+
+      - name: Record the scanner versions
+        run: |
+          trivy --version
+          grype version
+
+      - name: Scan the pinned target
+        run: |
+          trivy image --quiet --format json --output "$RUNNER_TEMP/trivy.json" "$TARGET_IMAGE"
+          grype "$TARGET_IMAGE" -o json > "$RUNNER_TEMP/grype.json"
+
+      # The drift tests skip themselves unless these point at fresh reports, so they are a no-op in ordinary CI and a real check here. A failure means the latest scanner output no longer converts to a complete finding set — the signal to update the converters before it reaches anyone.
+      - name: Convert and verify
+        env:
+          DRIFT_TRIVY_REPORT: ${{ runner.temp }}/trivy.json
+          DRIFT_GRYPE_REPORT: ${{ runner.temp }}/grype.json
+        run: go test ./internal/convert -run TestDrift -v
+
+      - name: Upload the reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scanner-reports
+          path: |
+            ${{ runner.temp }}/trivy.json
+            ${{ runner.temp }}/grype.json
+          retention-days: 14

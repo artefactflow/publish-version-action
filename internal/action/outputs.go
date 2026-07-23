@@ -20,6 +20,8 @@ func Outputs(res Result) []Output {
 		{"version-url", res.VersionURL},
 		{"created", strconv.FormatBool(res.Created)},
 		{"vulnerabilities-uploaded", strconv.FormatBool(res.VulnerabilitiesUploaded)},
+		{"analyses-applied", strconv.Itoa(res.AnalysesApplied)},
+		{"converted-vulnerabilities-file", res.ConvertedFile},
 	}
 }
 

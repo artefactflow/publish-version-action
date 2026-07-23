@@ -85,7 +85,7 @@ jobs:
                   errors.append(f"action.yml is missing `branding.{field}`, which the Marketplace requires")
 
           declared = set(meta.get("outputs", {}))
-          expected = {"version", "version-url", "created", "vulnerabilities-uploaded"}
+          expected = {"version", "version-url", "created", "vulnerabilities-uploaded", "analyses-applied", "converted-vulnerabilities-file"}
           if declared != expected:
               errors.append(f"declared outputs {sorted(declared)} do not match the documented set {sorted(expected)}")
 
@@ -93,8 +93,10 @@ jobs:
           expected_inputs = {
               "api-url", "client-id", "client-secret", "artefact-name", "version",
               "commit-sha", "branch", "build-id", "pipeline-id", "lifecycle", "build-state",
-              "is-default", "note", "bom-ref", "hash", "properties",
-              "upload-vulnerabilities", "vulnerabilities-file", "if-exists",
+              "is-default", "note", "bom-ref", "hash", "properties", "external-references",
+              "build-timestamp", "purl", "cpe", "mime-type", "size", "download-url",
+              "upload-vulnerabilities", "vulnerabilities-file", "vulnerabilities-format",
+              "vex-file", "apply-vex-only", "converted-output-file", "if-exists",
           }
           if set(inputs) != expected_inputs:
               errors.append(f"declared inputs {sorted(inputs)} do not match the documented set {sorted(expected_inputs)}")
@@ -215,6 +217,39 @@ jobs:
             http*/v1/artefacts/*/versions/1.4.2) ;;
             *) echo "::error::output version-url = '$VERSION_URL', expected the version's API URL"; fail=1 ;;
           esac
+          exit $fail
+
+      # A scanner report converts and uploads in one step, and the converted native JSON is written for inspection. Only a real runner exercises detection, conversion, and the converted-output file through the container entrypoint.
+      - name: Publish a version from a Trivy report
+        id: scan
+        uses: ./ci-local-action
+        with:
+          api-url: ${{ steps.stub.outputs.api-url }}
+          client-id: 507f191e810c19729de860ed
+          client-secret: afsa_stub-client-secret
+          artefact-name: acme-payment-service
+          version: 3.1.0
+          upload-vulnerabilities: "true"
+          vulnerabilities-file: examples/trivy-report.json
+          vex-file: examples/vex.json
+          # A relative path resolves inside the mounted workspace, the one place a container action's file is visible to later steps. An absolute path outside it would be written to the container's own filesystem and lost.
+          converted-output-file: converted.json
+
+      - name: Assert the Trivy report was converted and written out
+        env:
+          UPLOADED: ${{ steps.scan.outputs.vulnerabilities-uploaded }}
+          CONVERTED: ${{ steps.scan.outputs.converted-vulnerabilities-file }}
+        run: |
+          fail=0
+          [ "$UPLOADED" = "true" ] || { echo "::error::vulnerabilities-uploaded = '$UPLOADED', expected 'true'"; fail=1; }
+          [ "$CONVERTED" = "converted.json" ] || { echo "::error::converted-vulnerabilities-file = '$CONVERTED', expected 'converted.json'"; fail=1; }
+          [ -f "converted.json" ] || { echo "::error::converted output file was not written to the workspace"; fail=1; }
+          # The overlaid VEX assessment must survive into the converted native JSON.
+          if [ -f "converted.json" ] && ! grep -q '"not_affected"' converted.json; then
+            echo "::error::the VEX analysis was not merged into the converted output"
+            fail=1
+          fi
+          rm -f converted.json
           exit $fail
 
       # The default is `fail`, and a workflow relying on that must actually see a failed step.

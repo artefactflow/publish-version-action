@@ -1,0 +1,46 @@
+{
+  "format": "grype",
+  "cleared": false,
+  "findings": [
+    {
+      "id": "CVE-2023-44487",
+      "source": {
+        "name": "NVD",
+        "url": "https://nvd.nist.gov/vuln/detail/CVE-2023-44487"
+      },
+      "ratings": [
+        {
+          "score": 7.5,
+          "severity": "high",
+          "method": "CVSSv31",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"
+        }
+      ],
+      "description": "HTTP/2 Rapid Reset denial of service.",
+      "recommendation": "Upgrade to 1.60.0.",
+      "affects": [
+        {
+          "ref": "pkg:apk/alpine/nghttp2@1.58.0-r0?arch=x86_64"
+        }
+      ]
+    },
+    {
+      "id": "GHSA-xxxx-yyyy-zzzz",
+      "source": {
+        "name": "GitHub Advisory Database",
+        "url": "https://github.com/advisories/GHSA-xxxx-yyyy-zzzz"
+      },
+      "ratings": [
+        {
+          "severity": "low"
+        }
+      ],
+      "description": "A finding whose only severity is a scanner term with no CVSS vector.",
+      "affects": [
+        {
+          "ref": "pkg:golang/golang.org/x/text@0.3.7"
+        }
+      ]
+    }
+  ]
+}

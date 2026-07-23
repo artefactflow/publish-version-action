@@ -1,6 +1,7 @@
 package action
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -349,5 +350,120 @@ func TestBuildReferencesSkippedOutsideAWorkflow(t *testing.T) {
 	// Run locally there is no workflow run to link to, and a link built from empty pieces would be worse than none.
 	if refs := loadFrom(t, vars).Version.ExternalReferences; refs != nil {
 		t.Errorf("external_references = %+v, want none outside a workflow run", refs)
+	}
+}
+
+// Every field the create endpoint accepts has to be reachable from a workflow; a field the API takes but the action cannot set is a gap the user has no way around.
+func TestEveryVersionFieldIsReachable(t *testing.T) {
+	vars := validEnv()
+	vars["INPUT_BUILD-TIMESTAMP"] = "2026-06-15T10:30:00Z"
+	vars["INPUT_PURL"] = "pkg:docker/acme/payment-service@1.4.2"
+	vars["INPUT_CPE"] = "cpe:2.3:a:acme:payment-service:1.4.2:*:*:*:*:*:*:*"
+	vars["INPUT_MIME-TYPE"] = "application/x-tar"
+	vars["INPUT_SIZE"] = "52428800"
+	vars["INPUT_DOWNLOAD-URL"] = "https://registry.example.com/payment-service/1.4.2/download"
+	vars["INPUT_BOM-REF"] = "acme-payment-service-1.4.2"
+
+	v := loadFrom(t, vars).Version
+	if v.BuildTimestamp != "2026-06-15T10:30:00Z" || v.PURL != "pkg:docker/acme/payment-service@1.4.2" {
+		t.Errorf("build_timestamp/purl = %q/%q", v.BuildTimestamp, v.PURL)
+	}
+	if v.CPE == "" || v.MimeType != "application/x-tar" || v.DownloadURL == "" || v.BOMRef == "" {
+		t.Errorf("version body = %+v", v)
+	}
+	if v.Size == nil || *v.Size != 52428800 {
+		t.Errorf("size = %v, want 52428800", v.Size)
+	}
+}
+
+func TestParseExternalReferences(t *testing.T) {
+	vars := validEnv()
+	vars["INPUT_EXTERNAL-REFERENCES"] = "release-notes https://example.com/releases/1.4.2 Release notes for 1.4.2\n\n  Documentation https://docs.example.com  \n"
+
+	refs := loadFrom(t, vars).Version.ExternalReferences
+	// Two supplied, plus the automatic link back to the workflow run.
+	if len(refs) != 3 {
+		t.Fatalf("external_references = %+v, want 2 supplied plus the build link", refs)
+	}
+	if refs[0].Type != "release-notes" || refs[0].Comment != "Release notes for 1.4.2" {
+		t.Errorf("refs[0] = %+v, want everything after the URL treated as the comment", refs[0])
+	}
+	// A type is matched case-insensitively and normalised, and a reference without a comment is fine.
+	if refs[1].Type != "documentation" || refs[1].URL != "https://docs.example.com" || refs[1].Comment != "" {
+		t.Errorf("refs[1] = %+v", refs[1])
+	}
+	if refs[2].Type != "build-system" {
+		t.Errorf("refs[2] = %+v, want the automatic workflow-run link last", refs[2])
+	}
+}
+
+// Two contradictory answers to "which build made this?" is worse than trusting what the workflow said.
+func TestOwnBuildSystemReferenceSuppressesTheAutomaticOne(t *testing.T) {
+	vars := validEnv()
+	vars["INPUT_EXTERNAL-REFERENCES"] = "build-system https://jenkins.example.com/job/payments/42 Upstream build"
+
+	refs := loadFrom(t, vars).Version.ExternalReferences
+	if len(refs) != 1 || refs[0].URL != "https://jenkins.example.com/job/payments/42" {
+		t.Fatalf("external_references = %+v, want only the supplied build-system reference", refs)
+	}
+}
+
+func TestRejectsUnusableVersionFields(t *testing.T) {
+	tests := map[string]struct{ key, value, want string }{
+		"bad timestamp":       {"INPUT_BUILD-TIMESTAMP", "15-06-2026", "RFC 3339"},
+		"purl without scheme": {"INPUT_PURL", "docker/acme/payment-service", "package URL"},
+		"relative download":   {"INPUT_DOWNLOAD-URL", "/downloads/1.4.2.tar", "absolute URL"},
+		"size not a number":   {"INPUT_SIZE", "52 MB", "whole number of bytes"},
+		"negative size":       {"INPUT_SIZE", "-1", "cannot be negative"},
+		"unknown ref type":    {"INPUT_EXTERNAL-REFERENCES", "changelog https://example.com", "unknown type"},
+		"ref without a url":   {"INPUT_EXTERNAL-REFERENCES", "release-notes", "`type url [comment]`"},
+		"ref with bad url":    {"INPUT_EXTERNAL-REFERENCES", "release-notes notaurl", "absolute URL"},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			vars := validEnv()
+			vars[tc.key] = tc.value
+			_, err := LoadConfig(getenvFrom(vars))
+			if err == nil {
+				t.Fatalf("LoadConfig accepted %s=%q", tc.key, tc.value)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %v, want it to mention %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// fullyPopulatedEnv sets every input that contributes to the create body.
+func fullyPopulatedEnv(t *testing.T) map[string]string {
+	t.Helper()
+	vars := validEnv()
+	vars["INPUT_LIFECYCLE"] = "release"
+	vars["INPUT_BUILD-STATE"] = "success"
+	vars["INPUT_IS-DEFAULT"] = "true"
+	vars["INPUT_NOTE"] = "n"
+	vars["INPUT_BOM-REF"] = "acme-payment-service-1.4.2"
+	vars["INPUT_HASH"] = "sha256:" + testDigest
+	vars["INPUT_PROPERTIES"] = "runner=ubuntu-latest"
+	vars["INPUT_EXTERNAL-REFERENCES"] = "documentation https://docs.example.com"
+	vars["INPUT_BUILD-TIMESTAMP"] = "2026-06-15T10:30:00Z"
+	vars["INPUT_PURL"] = "pkg:docker/acme/payment-service@1.4.2"
+	vars["INPUT_CPE"] = "cpe:2.3:a:acme:payment-service:1.4.2:*:*:*:*:*:*:*"
+	vars["INPUT_MIME-TYPE"] = "application/x-tar"
+	vars["INPUT_SIZE"] = "52428800"
+	vars["INPUT_DOWNLOAD-URL"] = "https://registry.example.com/1.4.2.tar"
+	return vars
+}
+
+// A field the API accepts but no input reaches is a gap a workflow author cannot work around, and adding one to the model without wiring it up is an easy thing to miss in review. Reflecting over the whole body catches that at build time rather than leaving it to be discovered in use.
+//
+// If this fails after you add a field to VersionInput, add the matching action input — do not exempt the field.
+func TestNoVersionFieldIsUnreachable(t *testing.T) {
+	v := reflect.ValueOf(loadFrom(t, fullyPopulatedEnv(t)).Version)
+	for i := range v.NumField() {
+		name := v.Type().Field(i).Name
+		if v.Field(i).IsZero() {
+			t.Errorf("VersionInput.%s is still zero with every input supplied, so no action input reaches it", name)
+		}
 	}
 }

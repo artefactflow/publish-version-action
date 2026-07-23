@@ -68,6 +68,29 @@ func run() error {
 	}
 	fmt.Printf("Resolved artefact %s to %s\n", cfg.ArtefactName, artefactID)
 
+	// The standalone VEX path applies assessments to an already-recorded set; it neither creates a version nor uploads a scan.
+	if cfg.ApplyVEXOnly {
+		res, applyErr := action.ApplyVEX(ctx, cfg, artefactID, client, os.Stdout)
+		if err := writeOutputs(action.Outputs(res)); err != nil {
+			if applyErr != nil {
+				return fmt.Errorf("%w (additionally, writing the action outputs failed: %v)", applyErr, err)
+			}
+			return err
+		}
+		if applyErr != nil {
+			return applyErr
+		}
+		fmt.Printf("publish-version %s: applied %d VEX assessment(s) to %s of %s\n", version, res.AnalysesApplied, res.Version, cfg.ArtefactName)
+		return nil
+	}
+
+	// Write the converted set before publishing, so a workflow that asked to inspect it has it even if the upload later fails. Only meaningful when a set was actually prepared.
+	if cfg.UploadVulnerabilities {
+		if err := action.WriteConvertedOutput(cfg.ConvertedOutputFile, cfg.Vulnerabilities); err != nil {
+			return err
+		}
+	}
+
 	res, publishErr := action.Publish(ctx, cfg, artefactID, client, os.Stdout)
 
 	// The outputs are written even when the run failed. A version created before the vulnerability upload failed is still a fact the rest of the workflow has to be able to see.
