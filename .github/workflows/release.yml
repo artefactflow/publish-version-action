@@ -144,7 +144,7 @@ jobs:
       - name: Build and push by digest
         id: build
         if: steps.existing.outputs.digest == ''
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           # A container action only ever runs on a Linux runner, but arm64 runners are Linux too.
