@@ -1,0 +1,74 @@
+{
+  "SchemaVersion": 2,
+  "ArtifactName": "acme/payment-service:1.4.2",
+  "ArtifactType": "container_image",
+  "Results": [
+    {
+      "Target": "acme/payment-service:1.4.2 (alpine 3.19.1)",
+      "Class": "os-pkgs",
+      "Type": "alpine",
+      "Vulnerabilities": [
+        {
+          "VulnerabilityID": "CVE-2023-44487",
+          "PkgName": "libnghttp2",
+          "PkgIdentifier": { "PURL": "pkg:apk/alpine/libnghttp2@1.58.0-r0?arch=x86_64" },
+          "InstalledVersion": "1.58.0-r0",
+          "FixedVersion": "1.60.0-r0",
+          "Severity": "HIGH",
+          "SeveritySource": "nvd",
+          "PrimaryURL": "https://avd.aquasec.com/nvd/cve-2023-44487",
+          "Title": "HTTP/2 Rapid Reset",
+          "Description": "The HTTP/2 protocol allows a denial of service via rapid stream creation and cancellation.",
+          "CweIDs": ["CWE-400"],
+          "CVSS": {
+            "nvd": {
+              "V3Vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+              "V3Score": 7.5
+            },
+            "redhat": {
+              "V3Vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L",
+              "V3Score": 5.3
+            }
+          },
+          "PublishedDate": "2023-10-10T14:15:10.883Z",
+          "LastModifiedDate": "2023-11-01T00:00:00Z",
+          "DataSource": { "ID": "alpine", "Name": "Alpine Secdb", "URL": "https://secdb.alpinelinux.org/" }
+        },
+        {
+          "VulnerabilityID": "CVE-2024-00001",
+          "PkgName": "libcrypto3",
+          "PkgIdentifier": { "PURL": "pkg:apk/alpine/libcrypto3@3.1.4-r5?arch=x86_64" },
+          "InstalledVersion": "3.1.4-r5",
+          "Severity": "MEDIUM",
+          "Title": "Example finding with no data source and no CVSS vector"
+        }
+      ]
+    },
+    {
+      "Target": "usr/local/bin/app",
+      "Class": "lang-pkgs",
+      "Type": "gobinary",
+      "Vulnerabilities": [
+        {
+          "VulnerabilityID": "CVE-2024-00001",
+          "PkgName": "golang.org/x/net",
+          "PkgIdentifier": { "PURL": "pkg:golang/golang.org/x/net@0.17.0" },
+          "InstalledVersion": "0.17.0",
+          "FixedVersion": "0.23.0",
+          "Severity": "MEDIUM",
+          "SeveritySource": "ghsa",
+          "PrimaryURL": "https://avd.aquasec.com/nvd/cve-2024-00001",
+          "Description": "The same identifier affecting a second package, which must merge into one finding.",
+          "CVSS": {
+            "ghsa": { "V3Vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N", "V3Score": 5.3 }
+          }
+        }
+      ]
+    },
+    {
+      "Target": "Node.js",
+      "Class": "lang-pkgs",
+      "Type": "node-pkg"
+    }
+  ]
+}

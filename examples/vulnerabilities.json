@@ -1,0 +1,28 @@
+{
+  "vulnerabilities": [
+    {
+      "id": "CVE-2023-44487",
+      "source": {
+        "name": "NVD",
+        "url": "https://nvd.nist.gov/vuln/detail/CVE-2023-44487"
+      },
+      "ratings": [
+        { "score": 7.5, "severity": "high", "method": "CVSSv31" }
+      ],
+      "cwes": [400],
+      "description": "HTTP/2 Rapid Reset: a denial-of-service via rapid stream creation and cancellation.",
+      "recommendation": "Upgrade the HTTP/2 server library to a patched release.",
+      "analysis": { "state": "in_triage" }
+    },
+    {
+      "id": "CVE-2024-28180",
+      "source": { "name": "NVD" },
+      "ratings": [
+        { "score": 5.3, "severity": "medium", "method": "CVSSv31" }
+      ],
+      "cwes": [409],
+      "description": "Improper handling of JWE compressed content could allow resource exhaustion.",
+      "analysis": { "state": "not_affected", "justification": "code_not_reachable" }
+    }
+  ]
+}

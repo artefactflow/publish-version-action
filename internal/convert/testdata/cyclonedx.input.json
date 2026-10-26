@@ -1,0 +1,51 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "version": 1,
+  "vulnerabilities": [
+    {
+      "bom-ref": "vuln-1",
+      "id": "CVE-2023-44487",
+      "source": { "name": "NVD", "url": "https://nvd.nist.gov/vuln/detail/CVE-2023-44487" },
+      "ratings": [
+        {
+          "source": { "name": "nvd" },
+          "score": 7.5,
+          "severity": "high",
+          "method": "CVSSv31",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"
+        },
+        {
+          "source": { "name": "redhat" },
+          "score": 5.3,
+          "severity": "medium",
+          "method": "SSVC"
+        }
+      ],
+      "cwes": [400],
+      "description": "HTTP/2 Rapid Reset.",
+      "recommendation": "Upgrade the HTTP/2 library.",
+      "published": "2023-10-10T14:15:10Z",
+      "updated": "2023-11-01T00:00:00Z",
+      "analysis": {
+        "state": "resolved_with_pedigree",
+        "response": ["update"],
+        "detail": "Fixed by upgrading the vendored library."
+      },
+      "affects": [
+        {
+          "ref": "pkg:apk/alpine/libnghttp2@1.58.0-r0",
+          "versions": [
+            { "version": "1.58.0-r0", "status": "affected" },
+            { "range": "vers:apk/>=1.58.0|<1.60.0", "status": "affected" }
+          ]
+        }
+      ]
+    },
+    {
+      "bom-ref": "vuln-2",
+      "id": "GHSA-aaaa-bbbb-cccc",
+      "description": "A CycloneDX finding with no explicit source and no ratings."
+    }
+  ]
+}

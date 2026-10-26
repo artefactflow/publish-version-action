@@ -1,0 +1,306 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# A new push to a pull request supersedes the run already in flight.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Verify formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test -race ./...
+
+  image:
+    name: Build image
+    # The action is a container action, so a Dockerfile that no longer builds breaks every consumer. Validate it on every change; nothing is pushed here.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: publish-version-action:ci
+
+  action:
+    name: Action metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Marketplace rejects a release whose action.yml is malformed, and it does so only at publish time. Catching it here keeps that failure off the release path.
+      - name: Validate action.yml
+        run: |
+          python3 - <<'PY'
+          import sys, yaml
+
+          with open("action.yml") as fh:
+              meta = yaml.safe_load(fh)
+
+          errors = []
+          for field in ("name", "description", "runs"):
+              if not meta.get(field):
+                  errors.append(f"action.yml is missing the required `{field}` field")
+
+          branding = meta.get("branding") or {}
+          for field in ("icon", "color"):
+              if not branding.get(field):
+                  errors.append(f"action.yml is missing `branding.{field}`, which the Marketplace requires")
+
+          declared = set(meta.get("outputs", {}))
+          expected = {"version", "version-url", "created", "vulnerabilities-uploaded", "analyses-applied", "converted-vulnerabilities-file"}
+          if declared != expected:
+              errors.append(f"declared outputs {sorted(declared)} do not match the documented set {sorted(expected)}")
+
+          inputs = meta.get("inputs") or {}
+          expected_inputs = {
+              "api-url", "client-id", "client-secret", "artefact-name", "version",
+              "commit-sha", "branch", "build-id", "pipeline-id", "lifecycle", "build-state",
+              "is-default", "note", "bom-ref", "hash", "properties", "external-references",
+              "build-timestamp", "purl", "cpe", "mime-type", "size", "download-url",
+              "upload-vulnerabilities", "vulnerabilities-file", "vulnerabilities-format",
+              "vex-file", "apply-vex-only", "converted-output-file", "if-exists",
+          }
+          if set(inputs) != expected_inputs:
+              errors.append(f"declared inputs {sorted(inputs)} do not match the documented set {sorted(expected_inputs)}")
+
+          for name, spec in inputs.items():
+              if not (spec or {}).get("description"):
+                  errors.append(f"input `{name}` has no description")
+              # Every default resolves in the action so the ARTEFACTFLOW_ variables stay reachable; a `default:` here would make the runner substitute one first and silently break that.
+              if "default" in (spec or {}):
+                  errors.append(f"input `{name}` must not declare a default: it would shadow the {name.replace('-', '_').upper()} environment variable")
+
+          if errors:
+              print("\n".join(f"::error::{e}" for e in errors))
+              sys.exit(1)
+          print("action.yml looks well-formed")
+          PY
+
+  smoke:
+    name: Smoke test
+    # Runs the action end to end against a stub API, so the wiring the unit tests cannot reach (input plumbing, $GITHUB_OUTPUT, the container entrypoint) is exercised on every change. It uses no secrets, so it also runs on pull requests from forks.
+    #
+    # Do not add service containers to this job. They would put the action on a per-job network, and the stub address resolved below assumes the default bridge.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Once action.yml references a published image, `uses: ./` would pull that image and test the last release instead of this pull request, passing no matter what the diff does to the code. Staging a copy whose action.yml builds from the Dockerfile keeps the smoke test pointed at the source under review.
+      #
+      # A copy rather than an edit in place, so this never depends on when the runner reads the real action.yml.
+      - name: Stage a source-built copy of the action
+        run: |
+          mkdir -p ci-local-action
+          cp -R action.yml Dockerfile .dockerignore go.mod cmd internal ci-local-action/
+          python3 - <<'PY'
+          import re
+          path = "ci-local-action/action.yml"
+          with open(path) as fh:
+              content = fh.read()
+          patched, count = re.subn(r"(?m)^(\s*image:\s*).*$", r"\1'Dockerfile'", content)
+          if count != 1:
+              raise SystemExit(f"::error::expected exactly one `image:` line in action.yml, found {count}")
+          with open(path, "w") as fh:
+              fh.write(patched)
+          PY
+
+      - name: Start stub API
+        id: stub
+        run: |
+          # The stub binds every interface: the action runs in a container, so it reaches this over the docker bridge rather than on the loopback it would otherwise get. Its log goes to a file: a background process holding the step's stdout open can hang the job.
+          python3 testdata/stub-api.py 8080 >/tmp/stub.log 2>&1 &
+
+          gateway="$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}')"
+          echo "api-url=http://${gateway}:8080" >> "$GITHUB_OUTPUT"
+
+          # Prove the address works from inside a container before the action depends on it, so a networking change fails here with an obvious message instead of surfacing as a confusing action error.
+          for _ in $(seq 1 20); do
+            if docker run --rm curlimages/curl:latest -sf -X POST \
+                -H 'Content-Type: application/json' \
+                -d '{"client_id":"0198e2c3-9a21-7b8e-90f5-6c1d4e2a83b0","client_secret":"afsa_stub-client-secret"}' \
+                "http://${gateway}:8080/v1/auth/token" >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::stub API was not reachable from a container at http://${gateway}:8080"
+          exit 1
+
+      - name: Publish a version with its vulnerabilities
+        id: publish
+        uses: ./ci-local-action
+        with:
+          api-url: ${{ steps.stub.outputs.api-url }}
+          client-id: 0198e2c3-9a21-7b8e-90f5-6c1d4e2a83b0
+          client-secret: afsa_stub-client-secret
+          artefact-name: acme-payment-service
+          version: 1.4.2
+          note: Smoke test from CI.
+          hash: SHA-256:40436b8ce2524c748d95dd8ad223170aff624196bcfe689e13381d01d0d8efb6
+          upload-vulnerabilities: "true"
+          vulnerabilities-file: examples/vulnerabilities.json
+
+      # Re-publishing the same version must be an error by default, and a tolerated no-op with `if-exists: skip`. That branch only exists on a second run against a version that is already there, which no unit test reaches through the real runner.
+      #
+      # This step is also configured entirely through the ARTEFACTFLOW_ environment variables rather than `with:`. Nothing but a real runner tells us whether step-level env reaches a container action.
+      - name: Re-publish the same version with if-exists skip
+        id: republish
+        uses: ./ci-local-action
+        env:
+          ARTEFACTFLOW_API_URL: ${{ steps.stub.outputs.api-url }}
+          ARTEFACTFLOW_CLIENT_ID: 0198e2c3-9a21-7b8e-90f5-6c1d4e2a83b0
+          ARTEFACTFLOW_CLIENT_SECRET: afsa_stub-client-secret
+          ARTEFACTFLOW_ARTEFACT_NAME: acme-payment-service
+          ARTEFACTFLOW_VERSION: 1.4.2
+          ARTEFACTFLOW_IF_EXISTS: skip
+
+      - name: Assert outputs
+        env:
+          VERSION: ${{ steps.publish.outputs.version }}
+          VERSION_URL: ${{ steps.publish.outputs.version-url }}
+          CREATED: ${{ steps.publish.outputs.created }}
+          UPLOADED: ${{ steps.publish.outputs.vulnerabilities-uploaded }}
+          RE_CREATED: ${{ steps.republish.outputs.created }}
+          RE_VERSION: ${{ steps.republish.outputs.version }}
+        run: |
+          fail=0
+          check() {
+            if [ "$2" != "$3" ]; then
+              echo "::error::output $1 = '$2', expected '$3'"
+              fail=1
+            fi
+          }
+          check version "$VERSION" "1.4.2"
+          check created "$CREATED" "true"
+          check vulnerabilities-uploaded "$UPLOADED" "true"
+          check republish.version "$RE_VERSION" "1.4.2"
+          check republish.created "$RE_CREATED" "false"   # the version already existed; if-exists: skip tolerated it
+          case "$VERSION_URL" in
+            http*/v1/artefacts/*/versions/1.4.2) ;;
+            *) echo "::error::output version-url = '$VERSION_URL', expected the version's API URL"; fail=1 ;;
+          esac
+          exit $fail
+
+      # A scanner report converts and uploads in one step, and the converted native JSON is written for inspection. Only a real runner exercises detection, conversion, and the converted-output file through the container entrypoint.
+      - name: Publish a version from a Trivy report
+        id: scan
+        uses: ./ci-local-action
+        with:
+          api-url: ${{ steps.stub.outputs.api-url }}
+          client-id: 0198e2c3-9a21-7b8e-90f5-6c1d4e2a83b0
+          client-secret: afsa_stub-client-secret
+          artefact-name: acme-payment-service
+          version: 3.1.0
+          upload-vulnerabilities: "true"
+          vulnerabilities-file: examples/trivy-report.json
+          vex-file: examples/vex.json
+          # A relative path resolves inside the mounted workspace, the one place a container action's file is visible to later steps. An absolute path outside it would be written to the container's own filesystem and lost.
+          converted-output-file: converted.json
+
+      - name: Assert the Trivy report was converted and written out
+        env:
+          UPLOADED: ${{ steps.scan.outputs.vulnerabilities-uploaded }}
+          CONVERTED: ${{ steps.scan.outputs.converted-vulnerabilities-file }}
+        run: |
+          fail=0
+          [ "$UPLOADED" = "true" ] || { echo "::error::vulnerabilities-uploaded = '$UPLOADED', expected 'true'"; fail=1; }
+          [ "$CONVERTED" = "converted.json" ] || { echo "::error::converted-vulnerabilities-file = '$CONVERTED', expected 'converted.json'"; fail=1; }
+          [ -f "converted.json" ] || { echo "::error::converted output file was not written to the workspace"; fail=1; }
+          # The overlaid VEX assessment must survive into the converted native JSON.
+          if [ -f "converted.json" ] && ! grep -q '"not_affected"' converted.json; then
+            echo "::error::the VEX analysis was not merged into the converted output"
+            fail=1
+          fi
+          rm -f converted.json
+          exit $fail
+
+      # The default is `fail`, and a workflow relying on that must actually see a failed step.
+      - name: Re-publish without if-exists, expecting failure
+        id: conflict
+        continue-on-error: true
+        uses: ./ci-local-action
+        with:
+          api-url: ${{ steps.stub.outputs.api-url }}
+          client-id: 0198e2c3-9a21-7b8e-90f5-6c1d4e2a83b0
+          client-secret: afsa_stub-client-secret
+          artefact-name: acme-payment-service
+          version: 1.4.2
+
+      - name: Assert the conflict failed the step
+        run: |
+          if [ "${{ steps.conflict.outcome }}" != "failure" ]; then
+            echo "::error::publishing an existing version succeeded; it must fail unless if-exists is skip"
+            exit 1
+          fi
+
+      # The failure this action exists to make unambiguous: the version is created and the
+      # vulnerability upload then fails. The stub always fails the upload for 9.9.9. The step
+      # must fail, and it must still report that the version was created. A workflow left
+      # guessing at the artefact's state is the outcome this is all guarding against.
+      - name: Publish a version whose vulnerability upload fails
+        id: halfway
+        continue-on-error: true
+        uses: ./ci-local-action
+        with:
+          api-url: ${{ steps.stub.outputs.api-url }}
+          client-id: 0198e2c3-9a21-7b8e-90f5-6c1d4e2a83b0
+          client-secret: afsa_stub-client-secret
+          artefact-name: acme-payment-service
+          version: 9.9.9
+          upload-vulnerabilities: "true"
+          vulnerabilities-file: examples/vulnerabilities.json
+
+      - name: Assert the version was created but the upload was reported as failed
+        env:
+          CREATED: ${{ steps.halfway.outputs.created }}
+          UPLOADED: ${{ steps.halfway.outputs.vulnerabilities-uploaded }}
+          VERSION_URL: ${{ steps.halfway.outputs.version-url }}
+        run: |
+          fail=0
+          if [ "${{ steps.halfway.outcome }}" != "failure" ]; then
+            echo "::error::a failed vulnerability upload must fail the step"
+            fail=1
+          fi
+          # Outputs have to survive a failed run, or the workflow cannot tell what was published.
+          [ "$CREATED" = "true" ] || { echo "::error::created = '$CREATED', expected 'true'"; fail=1; }
+          [ "$UPLOADED" = "false" ] || { echo "::error::vulnerabilities-uploaded = '$UPLOADED', expected 'false'"; fail=1; }
+          [ -n "$VERSION_URL" ] || { echo "::error::version-url was empty after a partially successful run"; fail=1; }
+          exit $fail

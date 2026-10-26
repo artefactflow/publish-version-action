@@ -1,0 +1,53 @@
+name: Bug report
+description: Something the action does that it should not, or does not do that it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Before filling this in, please check that no client secret, token, API URL, or other credential appears in anything you paste: issues are public.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did the action do, and what did you expect instead? If a version was created but its vulnerabilities were not, say so. The two calls fail differently.
+    validations:
+      required: true
+
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Workflow step
+      description: The step that uses this action, with secrets redacted.
+      render: yaml
+      placeholder: |
+        - uses: artefactflow/publish-version-action@v1
+          with:
+            client-id: ${{ secrets.ARTEFACTFLOW_CLIENT_ID }}
+            client-secret: ${{ secrets.ARTEFACTFLOW_CLIENT_SECRET }}
+            artefact-name: acme-payment-service
+            version: 1.4.2
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Step log
+      description: The relevant part of the step output, with anything sensitive removed. The API's log id, when one is quoted, is what we need to trace a 403 or a 500.
+      render: shell
+
+  - type: input
+    id: version
+    attributes:
+      label: Action version
+      description: The tag or SHA the workflow pins, for example v1 or v1.2.3.
+    validations:
+      required: true
+
+  - type: input
+    id: runner
+    attributes:
+      label: Runner
+      description: For example ubuntu-latest, or the image of a self-hosted runner.

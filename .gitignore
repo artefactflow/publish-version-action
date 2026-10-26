@@ -1,0 +1,11 @@
+# Built binaries
+/publish-version
+/dist/
+
+# The source-built copy of the action that CI stages for the smoke test. Reproducing that
+# locally leaves a second copy of cmd/ and internal/ behind, which must never be committed.
+/ci-local-action/
+
+# Local env / secrets
+*.env
+.env

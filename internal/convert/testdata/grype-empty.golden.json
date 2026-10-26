@@ -1,0 +1,8 @@
+{
+  "format": "grype",
+  "cleared": true,
+  "notes": [
+    "the grype report contains no vulnerabilities; the upload will clear any findings previously recorded for this version"
+  ],
+  "findings": []
+}

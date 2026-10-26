@@ -1,0 +1,36 @@
+{
+  "SchemaVersion": 2,
+  "ArtifactName": "acme/payment-service:1.4.2",
+  "ArtifactType": "container_image",
+  "Results": [
+    {
+      "Target": "acme/payment-service:1.4.2 (alpine 3.19.1)",
+      "Class": "os-pkgs",
+      "Type": "alpine",
+      "Vulnerabilities": [
+        {
+          "VulnerabilityID": "CVE-2023-44487",
+          "PkgName": "libnghttp2",
+          "PkgIdentifier": { "PURL": "pkg:apk/alpine/libnghttp2@1.58.0-r0?arch=x86_64" },
+          "InstalledVersion": "1.58.0-r0",
+          "FixedVersion": "1.60.0-r0",
+          "Severity": "HIGH",
+          "SeveritySource": "nvd",
+          "PrimaryURL": "https://avd.aquasec.com/nvd/cve-2023-44487",
+          "Title": "HTTP/2 Rapid Reset",
+          "Description": "The HTTP/2 protocol allows a denial of service via rapid stream creation and cancellation.",
+          "CweIDs": ["CWE-400"],
+          "CVSS": {
+            "nvd": {
+              "V3Vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+              "V3Score": 7.5
+            }
+          },
+          "PublishedDate": "2023-10-10T14:15:10.883Z",
+          "LastModifiedDate": "2023-11-01T00:00:00Z",
+          "DataSource": { "ID": "nvd", "Name": "NVD", "URL": "https://nvd.nist.gov/" }
+        }
+      ]
+    }
+  ]
+}

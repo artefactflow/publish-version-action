@@ -1,0 +1,62 @@
+{
+  "format": "trivy",
+  "cleared": false,
+  "findings": [
+    {
+      "id": "CVE-2023-44487",
+      "source": {
+        "name": "Alpine Secdb",
+        "url": "https://secdb.alpinelinux.org/"
+      },
+      "ratings": [
+        {
+          "score": 7.5,
+          "severity": "high",
+          "method": "CVSSv31",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"
+        },
+        {
+          "score": 5.3,
+          "method": "CVSSv31",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L"
+        }
+      ],
+      "cwes": [
+        400
+      ],
+      "description": "The HTTP/2 protocol allows a denial of service via rapid stream creation and cancellation.",
+      "recommendation": "Upgrade libnghttp2 to 1.60.0-r0.",
+      "affects": [
+        {
+          "ref": "pkg:apk/alpine/libnghttp2@1.58.0-r0?arch=x86_64"
+        }
+      ],
+      "published": "2023-10-10T14:15:10.883Z",
+      "updated": "2023-11-01T00:00:00Z"
+    },
+    {
+      "id": "CVE-2024-00001",
+      "source": {
+        "name": "NVD"
+      },
+      "ratings": [
+        {
+          "score": 5.3,
+          "severity": "medium",
+          "method": "CVSSv31",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"
+        }
+      ],
+      "description": "Example finding with no data source and no CVSS vector",
+      "recommendation": "Upgrade golang.org/x/net to 0.23.0.",
+      "affects": [
+        {
+          "ref": "pkg:apk/alpine/libcrypto3@3.1.4-r5?arch=x86_64"
+        },
+        {
+          "ref": "pkg:golang/golang.org/x/net@0.17.0"
+        }
+      ]
+    }
+  ]
+}

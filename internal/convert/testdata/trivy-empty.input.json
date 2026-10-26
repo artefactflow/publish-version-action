@@ -1,0 +1,7 @@
+{
+  "SchemaVersion": 2,
+  "ArtifactName": "acme/clean-image:1.0.0",
+  "Results": [
+    { "Target": "acme/clean-image:1.0.0 (alpine 3.19.1)", "Class": "os-pkgs", "Type": "alpine" }
+  ]
+}

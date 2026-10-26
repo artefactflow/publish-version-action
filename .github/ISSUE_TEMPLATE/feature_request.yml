@@ -1,0 +1,25 @@
+name: Feature request
+description: Suggest an input, an output, or a behaviour the action does not have yet
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: Describe the workflow you are building and where this action falls short. Understanding the goal usually matters more than the proposed solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like it to do?
+      description: If you have a shape in mind (a new input, another output), sketch it here.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What have you tried instead?
+      description: Workarounds you are using today, and why they are not enough.

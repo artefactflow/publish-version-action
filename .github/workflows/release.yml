@@ -1,0 +1,363 @@
+name: Release
+
+# Publishes a release of the action: the container image it runs, its SBOM, the GitHub release, and the moving major tag consumers pin to.
+#
+# The tag trigger is deliberately commented out while the action is still being built, so no accidental push can publish. Enable it by uncommenting the `push:` block below; until then the workflow only ever runs when someone starts it by hand.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to publish, for example v1.0.0. Create and push the tag first.'
+        required: true
+        type: string
+      dry-run:
+        description: 'Build everything but publish nothing.'
+        required: false
+        type: boolean
+        default: true
+  # push:
+  #   tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+  PLATFORMS: linux/amd64 linux/arm64
+  # Pinned, Trivy by a checksum recorded here rather than one fetched from the same release. Keep equal to security.yml; Dependabot does not update them.
+  TRIVY_VERSION: 0.73.0
+  TRIVY_SHA256: 2edd39da482bb4e9831962487b68f68e3928ec3137794757f54d00383d79547b
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      major: ${{ steps.resolve.outputs.major }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Resolve the release tag
+        id: resolve
+        env:
+          # A dispatch supplies the tag as an input; a tag push carries it in the ref.
+          RAW_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if ! printf '%s' "$RAW_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::'$RAW_TAG' is not a v-prefixed SemVer tag (for example v1.2.3)"
+            exit 1
+          fi
+          echo "tag=$RAW_TAG" >> "$GITHUB_OUTPUT"
+          echo "major=${RAW_TAG%%.*}" >> "$GITHUB_OUTPUT"
+
+      # action.yml pins one exact image version, and that reference has to name the release being cut. Getting it wrong is silent and nasty: the release publishes, but every consumer of the new tag runs the previous version's image, or fails to pull an image that does not exist.
+      - name: Check the image reference matches the release
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          python3 - <<'PY'
+          import os, re, sys, yaml
+
+          tag = os.environ["TAG"]
+          version = tag.lstrip("v")
+          image = (yaml.safe_load(open("action.yml"))["runs"] or {}).get("image", "")
+
+          if image == "Dockerfile":
+              # Only legitimate before the first image exists: the action builds on the runner.
+              print(f"::warning::action.yml still builds from the Dockerfile, so users of this release build the image on their own runner from the newest base layers: the published image, its SBOM and its vulnerability check do not describe what they run. Prefer docker://…:{version} even for the first release; this workflow publishes that image before the release exists.")
+              sys.exit(0)
+
+          match = re.fullmatch(r"docker://.+:(?P<tag>[^:]+)", image)
+          if not match:
+              print(f"::error::action.yml `runs.image` is {image!r}, which is neither 'Dockerfile' nor a docker:// reference with an explicit tag")
+              sys.exit(1)
+
+          referenced = match.group("tag")
+          if referenced in {"latest"} or re.fullmatch(r"\d+(\.\d+)?", referenced):
+              print(f"::error::action.yml references the floating image tag ':{referenced}'. Pin the exact version ':{version}' so a pinned ref keeps running the code it was pinned to.")
+              sys.exit(1)
+          if referenced != version:
+              print(f"::error::action.yml references image ':{referenced}' but the release is {tag}. Update the reference to ':{version}' and re-tag.")
+              sys.exit(1)
+
+          print(f"action.yml correctly references :{version}")
+          PY
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # The release path repeats the CI gates rather than trusting that CI ran on this commit: a tag can point anywhere.
+      - name: Test
+        run: go test -race ./...
+
+  image:
+    name: Build and push image
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.existing.outputs.digest || steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
+          persist-credentials: false
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: ${{ !inputs.dry-run }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # An image version is immutable: the release tag's action.yml pins it, and a user who pins that tag expects the exact image that was checked. A re-run for the same tag therefore re-uses the image that is already published instead of rebuilding it from newer base layers.
+      - name: Re-use an existing image for this version
+        id: existing
+        if: ${{ !inputs.dry-run }}
+        env:
+          TAG: ${{ needs.verify.outputs.tag }}
+        run: |
+          if digest="$(docker buildx imagetools inspect "${IMAGE}:${TAG#v}" --format '{{.Manifest.Digest}}' 2>/dev/null)" && [ -n "$digest" ]; then
+            echo "::notice::${IMAGE}:${TAG#v} already exists (${digest}); re-using it rather than rebuilding."
+            echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Derive image labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: type=semver,pattern={{version}},value=${{ needs.verify.outputs.tag }}
+
+      # Pushed by digest only, with no tag at all. Nothing can pull it by name until the promote job tags it, and that job only runs once the vulnerability gate has passed.
+      - name: Build and push by digest
+        id: build
+        if: steps.existing.outputs.digest == ''
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # A container action only ever runs on a Linux runner, but arm64 runners are Linux too.
+          platforms: linux/amd64,linux/arm64
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=${{ !inputs.dry-run }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ needs.verify.outputs.tag }}
+
+  sbom:
+    name: SBOM and vulnerability gate
+    needs: [verify, image]
+    # Scans the image that was just pushed, so there is nothing to scan on a dry run.
+    if: ${{ !inputs.dry-run }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      version: ${{ steps.scan.outputs.version }}
+      purl: ${{ steps.scan.outputs.purl }}
+    steps:
+      # The gate script comes from the release tag. A tag cut before the script existed cannot be released by this workflow; that fails closed.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
+          persist-credentials: false
+
+      - name: Install Trivy
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/trivy.tar.gz" "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  $RUNNER_TEMP/trivy.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$RUNNER_TEMP/trivy.tar.gz" -C "$RUNNER_TEMP/bin" trivy
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # One SBOM and one scan per platform, all from the pushed image by digest, so they describe exactly what users will pull and not a rebuild.
+      - name: Generate the SBOMs and scan the image
+        id: scan
+        env:
+          TAG: ${{ needs.verify.outputs.tag }}
+          DIGEST: ${{ needs.image.outputs.digest }}
+        run: |
+          version="${TAG#v}"
+          name="${GITHUB_REPOSITORY#*/}"
+          for platform in $PLATFORMS; do
+            arch="${platform#linux/}"
+            trivy image --quiet --platform "$platform" --format cyclonedx --output "${name}-${version}-${arch}.cdx.json" "${IMAGE}@${DIGEST}"
+            trivy image --quiet --platform "$platform" --scanners vuln --format json --output "trivy-${arch}.json" "${IMAGE}@${DIGEST}"
+          done
+          {
+            echo "version=$version"
+            echo "purl=pkg:oci/${name}@${DIGEST/:/%3A}?repository_url=${IMAGE}"
+          } >> "$GITHUB_OUTPUT"
+
+      # A release whose image holds a vulnerability that is being exploited must not reach users. The image is not tagged yet, so failing here leaves nothing pullable by name, no GitHub release and the major tag where it is.
+      - name: Check against the Known Exploited Vulnerabilities catalogue
+        run: |
+          status=0
+          for report in trivy-*.json; do
+            echo "Checking $report"
+            .github/scripts/kev-check.sh "$report" || status=1
+          done
+          exit $status
+
+      - name: Keep the SBOMs and scans for the later jobs
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: |
+            *.cdx.json
+            trivy-*.json
+
+  promote:
+    name: Tag and attest the image
+    needs: [verify, image, sbom]
+    if: ${{ !inputs.dry-run }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # docker/metadata-action would strip the leading v the same way: image tags are 1.2.3, 1.2, 1 and latest, never v1.
+      - name: Tag the checked image
+        env:
+          TAG: ${{ needs.verify.outputs.tag }}
+          DIGEST: ${{ needs.image.outputs.digest }}
+        run: |
+          version="${TAG#v}"
+          tags=(-t "${IMAGE}:${version}")
+          case "$version" in
+            *-*)
+              # A pre-release gets only its own exact tag: latest and the major tags are what people pull without thinking.
+              ;;
+            *)
+              tags+=(-t "${IMAGE}:${version%.*}" -t "${IMAGE}:${version%%.*}" -t "${IMAGE}:latest")
+              ;;
+          esac
+          docker buildx imagetools create "${tags[@]}" "${IMAGE}@${DIGEST}"
+
+      # Lets users, and the daily integrity check, verify that an image was built by this workflow from this repository: `gh attestation verify oci://<image> --repo <this repository>`.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ needs.image.outputs.digest }}
+          push-to-registry: true
+
+  release:
+    name: Publish release
+    needs: [verify, sbom, promote]
+    if: ${{ !inputs.dry-run }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: sbom
+          path: sbom
+
+      # The SBOMs are attached when the release is created: with immutable releases enabled, assets cannot be added afterwards.
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.verify.outputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; attaching the SBOMs if it still accepts them."
+            gh release upload "$TAG" sbom/*.cdx.json --clobber || echo "::warning::could not attach the SBOMs to the existing release $TAG (an immutable release cannot change). They are in this run's artifacts."
+            exit 0
+          fi
+          prerelease=()
+          case "$TAG" in *-*) prerelease=(--prerelease) ;; esac
+          gh release create "$TAG" --title "$TAG" --generate-notes "${prerelease[@]}" sbom/*.cdx.json
+
+      # Consumers pin to the major tag (`uses: artefactflow/publish-version-action@v1`) and expect it to follow the newest release, so it is repointed at each release. A pre-release must not move it.
+      - name: Move the major tag
+        env:
+          TAG: ${{ needs.verify.outputs.tag }}
+          MAJOR: ${{ needs.verify.outputs.major }}
+        run: |
+          case "$TAG" in
+            *-*)
+              echo "$TAG is a pre-release; leaving $MAJOR where it is."
+              exit 0
+              ;;
+          esac
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f -a "$MAJOR" -m "Track the newest $MAJOR release ($TAG)"
+          git push -f origin "refs/tags/$MAJOR"
+
+      - name: Marketplace reminder
+        run: |
+          echo "### Publish to the Marketplace" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Listing an action on the Marketplace is a manual step: open the release, choose **Edit**, and tick **Publish this Action to the GitHub Marketplace**. Only the first release needs it; later releases are listed automatically." >> "$GITHUB_STEP_SUMMARY"
+
+  artefactflow:
+    name: Record the release in ArtefactFlow
+    needs: [verify, image, sbom, release]
+    # Bookkeeping, not a gate: it runs after the release, so an ArtefactFlow outage or a missing service account never holds a release back. Skipped until the repository has the ARTEFACTFLOW_CLIENT_ID variable and the ARTEFACTFLOW_CLIENT_SECRET secret, and the artefact named after this repository exists in ArtefactFlow.
+    if: ${{ !inputs.dry-run && vars.ARTEFACTFLOW_CLIENT_ID != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # This repository records its own releases with the action at the tag being released, so the first release does not depend on a v1 that it is itself about to create.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: sbom
+          path: sbom
+
+      # ArtefactFlow keeps one vulnerability set per version, so the amd64 scan is recorded; both platforms come from the same Dockerfile. `if-exists: skip` makes a re-run converge instead of failing on the version it already created.
+      - name: Record the release
+        uses: ./
+        with:
+          client-id: ${{ vars.ARTEFACTFLOW_CLIENT_ID }}
+          client-secret: ${{ secrets.ARTEFACTFLOW_CLIENT_SECRET }}
+          artefact-name: ${{ github.event.repository.name }}
+          version: ${{ needs.sbom.outputs.version }}
+          lifecycle: ${{ contains(needs.verify.outputs.tag, '-') && 'beta' || 'release' }}
+          is-default: ${{ !contains(needs.verify.outputs.tag, '-') }}
+          hash: ${{ needs.image.outputs.digest }}
+          purl: ${{ needs.sbom.outputs.purl }}
+          if-exists: skip
+          upload-vulnerabilities: true
+          vulnerabilities-file: sbom/trivy-amd64.json
