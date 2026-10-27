@@ -1,9 +1,7 @@
 package action
 
 import (
-	"context"
 	"encoding/json"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -115,42 +113,6 @@ func TestLoadConfigRejectsMismatchedFormatOverride(t *testing.T) {
 	}
 }
 
-// apply-vex-only is a distinct mode: it needs a VEX file, forbids a scan, and parses the assessments up front.
-func TestLoadConfigApplyVEXOnly(t *testing.T) {
-	vex := `{"bomFormat":"CycloneDX","vulnerabilities":[{"id":"CVE-1","analysis":{"state":"not_affected","justification":"code_not_reachable"}}]}`
-	vars := validEnv()
-	vars["INPUT_APPLY-VEX-ONLY"] = "true"
-	vars["INPUT_VEX-FILE"] = writeNamed(t, "vex.json", vex)
-
-	cfg := loadFrom(t, vars)
-	if !cfg.ApplyVEXOnly || len(cfg.VEXEntries) != 1 {
-		t.Fatalf("cfg apply-vex-only=%v entries=%d", cfg.ApplyVEXOnly, len(cfg.VEXEntries))
-	}
-}
-
-func TestLoadConfigApplyVEXOnlyRejectsAScan(t *testing.T) {
-	vex := `{"bomFormat":"CycloneDX","vulnerabilities":[{"id":"CVE-1","analysis":{"state":"exploitable"}}]}`
-	vars := validEnv()
-	vars["INPUT_APPLY-VEX-ONLY"] = "true"
-	vars["INPUT_VEX-FILE"] = writeNamed(t, "vex.json", vex)
-	vars["INPUT_UPLOAD-VULNERABILITIES"] = "true"
-	vars["INPUT_VULNERABILITIES-FILE"] = writeNamed(t, "trivy.json", trivyReport)
-	if _, err := LoadConfig(getenvFrom(vars)); err == nil {
-		t.Fatal("LoadConfig accepted apply-vex-only together with a scan report")
-	}
-}
-
-// A justification-only VEX entry cannot be applied through the PATCH path, and that is caught at load rather than mid-run.
-func TestLoadConfigApplyVEXOnlyRejectsStatelessEntry(t *testing.T) {
-	vex := `{"bomFormat":"CycloneDX","vulnerabilities":[{"id":"CVE-1","analysis":{"justification":"code_not_reachable"}}]}`
-	vars := validEnv()
-	vars["INPUT_APPLY-VEX-ONLY"] = "true"
-	vars["INPUT_VEX-FILE"] = writeNamed(t, "vex.json", vex)
-	if _, err := LoadConfig(getenvFrom(vars)); err == nil || !strings.Contains(err.Error(), "no state") {
-		t.Fatalf("error = %v, want the stateless entry rejected", err)
-	}
-}
-
 // A VEX file with nothing to attach it to is a misconfiguration worth naming.
 func TestLoadConfigVEXWithoutScanOrApplyIsAnError(t *testing.T) {
 	vex := `{"bomFormat":"CycloneDX","vulnerabilities":[{"id":"CVE-1","analysis":{"state":"exploitable"}}]}`
@@ -178,89 +140,5 @@ func TestWriteConvertedOutput(t *testing.T) {
 	}
 	if len(round.Vulnerabilities) != 1 {
 		t.Errorf("converted output has %d findings, want 1", len(round.Vulnerabilities))
-	}
-}
-
-// The standalone VEX path applies each assessment, reports a finding that matched nothing as a warning, and fails the run on a real error while keeping the applied ones.
-func TestApplyVEX(t *testing.T) {
-	cfg := testConfig()
-	cfg.ApplyVEXOnly = true
-	cfg.VEXEntries = []convert.VEXEntry{
-		{ID: "CVE-1", Analysis: afclient.Analysis{State: "not_affected", Justification: "code_not_reachable"}},
-		{ID: "CVE-2", Analysis: afclient.Analysis{State: "exploitable"}},
-	}
-	api := &stubAPI{}
-
-	var log strings.Builder
-	res, err := ApplyVEX(context.Background(), cfg, testArtefactID, api, &log)
-	if err != nil {
-		t.Fatalf("ApplyVEX: %v", err)
-	}
-	if res.AnalysesApplied != 2 || len(api.analysisApplied) != 2 {
-		t.Errorf("applied %d, want 2", res.AnalysesApplied)
-	}
-}
-
-func TestApplyVEXReportsUnmatchedAsWarning(t *testing.T) {
-	cfg := testConfig()
-	cfg.VEXEntries = []convert.VEXEntry{
-		{ID: "CVE-1", Analysis: afclient.Analysis{State: "exploitable"}},
-		{ID: "CVE-MISSING", Analysis: afclient.Analysis{State: "resolved"}},
-	}
-	api := &stubAPI{analysisErrByID: map[string]error{
-		"CVE-MISSING": &afclient.StatusError{Status: 404, Snippet: "not found"},
-	}}
-
-	var log strings.Builder
-	res, err := ApplyVEX(context.Background(), cfg, testArtefactID, api, &log)
-	if err != nil {
-		t.Fatalf("ApplyVEX should not fail on an unmatched entry: %v", err)
-	}
-	if res.AnalysesApplied != 1 {
-		t.Errorf("applied %d, want 1", res.AnalysesApplied)
-	}
-	if !strings.Contains(log.String(), "::warning::") || !strings.Contains(log.String(), "CVE-MISSING") {
-		t.Errorf("log = %q, want a warning naming the unmatched finding", log.String())
-	}
-}
-
-// A run where nothing matched at all is not a success: it almost always means the wrong version, so it fails rather than reporting a clean no-op.
-func TestApplyVEXTotalMissFailsTheRun(t *testing.T) {
-	cfg := testConfig()
-	cfg.VEXEntries = []convert.VEXEntry{
-		{ID: "CVE-1", Analysis: afclient.Analysis{State: "exploitable"}},
-		{ID: "CVE-2", Analysis: afclient.Analysis{State: "resolved"}},
-	}
-	api := &stubAPI{analysisErrByID: map[string]error{
-		"CVE-1": &afclient.StatusError{Status: 404},
-		"CVE-2": &afclient.StatusError{Status: 404},
-	}}
-
-	res, err := ApplyVEX(context.Background(), cfg, testArtefactID, api, io.Discard)
-	if err == nil || res.AnalysesApplied != 0 {
-		t.Fatalf("res=%+v err=%v, want a failed run with 0 applied", res, err)
-	}
-	if !strings.Contains(err.Error(), "none of the") {
-		t.Errorf("error = %v, want it to say nothing matched", err)
-	}
-}
-
-// A partial failure (a real error on one assessment) must fail the run rather than report success, while the applied ones stand.
-func TestApplyVEXPartialFailureFailsTheRun(t *testing.T) {
-	cfg := testConfig()
-	cfg.VEXEntries = []convert.VEXEntry{
-		{ID: "CVE-1", Analysis: afclient.Analysis{State: "exploitable"}},
-		{ID: "CVE-2", Analysis: afclient.Analysis{State: "resolved"}},
-	}
-	api := &stubAPI{analysisErrByID: map[string]error{
-		"CVE-2": &afclient.StatusError{Status: 500, Snippet: "boom"},
-	}}
-
-	res, err := ApplyVEX(context.Background(), cfg, testArtefactID, api, io.Discard)
-	if err == nil {
-		t.Fatal("ApplyVEX reported success despite a failed assessment")
-	}
-	if res.AnalysesApplied != 1 || !strings.Contains(err.Error(), "CVE-2") {
-		t.Errorf("res=%+v err=%v, want 1 applied and CVE-2 named as failed", res, err)
 	}
 }

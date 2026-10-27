@@ -18,12 +18,6 @@ var ErrCreatedByOwnRetry = errors.New("the version was created by an earlier att
 // CreatedByOwnRetry reports whether err is the not-really-an-error above.
 func CreatedByOwnRetry(err error) bool { return errors.Is(err, ErrCreatedByOwnRetry) }
 
-// IsNotFound reports whether err is a 404 from the API. The standalone VEX path uses it to tell a finding that no scan ever recorded (an assessment with no target, which is reported per identifier) apart from a genuine failure.
-func IsNotFound(err error) bool {
-	var se *StatusError
-	return errors.As(err, &se) && se.Status == http.StatusNotFound
-}
-
 // artefactRef is the resolve endpoint's response: a minimal reference to one artefact.
 type artefactRef struct {
 	ID   string `json:"id"`
@@ -89,19 +83,6 @@ func (c *Client) ReplaceVulnerabilities(ctx context.Context, artefactID, version
 	// The endpoint reports success as 200 with the stored set; 201 and 204 are accepted too rather than failing a write that actually landed.
 	if _, err := c.sendJSON(ctx, http.MethodPut, path, in, http.StatusOK, http.StatusCreated, http.StatusNoContent); err != nil {
 		return fmt.Errorf("upload vulnerabilities for version %s: %w", versionValue, err)
-	}
-	return nil
-}
-
-// UpdateVulnerabilityAnalysis applies a VEX assessment to one already-recorded finding, addressed by its CVE identifier. It is the standalone path (triaging a version's findings without re-scanning) and, unlike the full-replace upload, it touches only the one finding named.
-//
-// A 404 is returned as-is rather than wrapped as a failure of the whole run: it means no finding with that identifier is recorded for the version, which the caller reports per identifier rather than treating as fatal. IsNotFound tells the two apart.
-func (c *Client) UpdateVulnerabilityAnalysis(ctx context.Context, artefactID, versionValue, vulnerabilityID string, in VulnerabilityAnalysisInput) error {
-	path := "/v1/artefacts/" + url.PathEscape(artefactID) +
-		"/versions/" + url.PathEscape(versionValue) +
-		"/vulnerabilities/" + url.PathEscape(vulnerabilityID) + "/analysis"
-	if _, err := c.sendJSON(ctx, http.MethodPatch, path, in, http.StatusOK); err != nil {
-		return fmt.Errorf("apply analysis to %s on version %s: %w", vulnerabilityID, versionValue, err)
 	}
 	return nil
 }

@@ -14,7 +14,6 @@ import (
 type API interface {
 	CreateVersion(ctx context.Context, artefactID string, in afclient.VersionInput) (*afclient.Version, string, error)
 	ReplaceVulnerabilities(ctx context.Context, artefactID, versionValue string, in afclient.VulnerabilitiesInput) error
-	UpdateVulnerabilityAnalysis(ctx context.Context, artefactID, versionValue, vulnerabilityID string, in afclient.VulnerabilityAnalysisInput) error
 }
 
 // Result is what the run produced, and what becomes the action's outputs.
@@ -25,8 +24,6 @@ type Result struct {
 	Created bool
 	// VulnerabilitiesUploaded reports whether the second call ran and succeeded.
 	VulnerabilitiesUploaded bool
-	// AnalysesApplied counts the VEX assessments applied on the standalone path.
-	AnalysesApplied int
 	// ConvertedFile is the path the converted native JSON was written to, when `converted-output-file` was set.
 	ConvertedFile string
 }
@@ -89,53 +86,6 @@ func Publish(ctx context.Context, cfg Config, artefactID string, api API, log io
 	}
 	res.VulnerabilitiesUploaded = true
 	fmt.Fprintf(log, "Recorded %d vulnerability finding(s) on version %s\n", n, res.Version)
-	return res, nil
-}
-
-// ApplyVEX is the standalone VEX path: it applies each assessment to a finding already recorded against the version, via PATCH, touching only the findings named. It creates no version and uploads no scan: it operates on the set already there.
-//
-// The path is not atomic across findings, so a partial failure is reported as one: the assessments that applied stand, and the run fails naming those that did not, rather than reporting success over a half-applied set. An assessment whose finding is not recorded (a 404) is a mismatch, reported as a warning rather than a failure: it usually means the VEX and the recorded findings are from different builds.
-func ApplyVEX(ctx context.Context, cfg Config, artefactID string, api API, log io.Writer) (Result, error) {
-	res := Result{Version: cfg.Version.Version}
-	res.VersionURL = versionURL(cfg.APIURL, artefactID, res.Version, "")
-
-	var applied, unmatched, failed []string
-	var firstErr error
-	for _, e := range cfg.VEXEntries {
-		in, err := e.AnalysisInput()
-		if err != nil {
-			// Guarded already at load time; treat a straggler as a hard failure rather than pressing on.
-			failed = append(failed, e.ID)
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
-		}
-		switch err := api.UpdateVulnerabilityAnalysis(ctx, artefactID, res.Version, e.ID, in); {
-		case err == nil:
-			applied = append(applied, e.ID)
-		case afclient.IsNotFound(err):
-			unmatched = append(unmatched, e.ID)
-		default:
-			failed = append(failed, e.ID)
-			if firstErr == nil {
-				firstErr = err
-			}
-		}
-	}
-	res.AnalysesApplied = len(applied)
-
-	fmt.Fprintf(log, "Applied VEX analysis to %d of %d finding(s) on version %s of %s\n", len(applied), len(cfg.VEXEntries), res.Version, cfg.ArtefactName)
-	if len(unmatched) > 0 {
-		fmt.Fprintf(log, "::warning::%d VEX assessment(s) matched no finding recorded on version %s and were not applied: %s. This usually means the VEX and the recorded findings are from different builds.\n", len(unmatched), res.Version, strings.Join(unmatched, ", "))
-	}
-	if firstErr != nil {
-		return res, fmt.Errorf("applied %d assessment(s) to version %s, but %d could not be applied (%s). Applying VEX is not atomic across findings, so the applied ones stand; re-run to retry the rest: %w", len(applied), res.Version, len(failed), strings.Join(failed, ", "), firstErr)
-	}
-	// Nothing applied at all. With entries to apply, this is not a success: the version is almost certainly wrong, or its findings were recorded from a different build. A warning alone would let a no-op run look clean.
-	if len(applied) == 0 {
-		return res, fmt.Errorf("none of the %d VEX assessment(s) matched a finding recorded on version %s of %s (%s). Check the version exists and that its findings were recorded from the same build the VEX describes", len(cfg.VEXEntries), res.Version, cfg.ArtefactName, strings.Join(unmatched, ", "))
-	}
 	return res, nil
 }
 

@@ -61,12 +61,8 @@ type Config struct {
 	// UnmatchedVEX names the VEX assessments that matched no converted finding, surfaced as a warning: it usually means the scan and the VEX are from different builds.
 	UnmatchedVEX []string
 
-	// VEXFile is the CycloneDX VEX document supplied alongside a scan (overlaid into the upload) or on its own (see ApplyVEXOnly).
+	// VEXFile is the CycloneDX VEX document supplied alongside a scan report, overlaid into the upload.
 	VEXFile string
-	// ApplyVEXOnly selects the standalone VEX path: apply assessments to a version's already-recorded findings via PATCH, with no scan report and no version create.
-	ApplyVEXOnly bool
-	// VEXEntries are the parsed standalone assessments, validated here so a malformed VEX document fails before any is applied.
-	VEXEntries []convert.VEXEntry
 
 	// ConvertedOutputFile, when set, receives the native JSON that will be uploaded, so a workflow can inspect or archive it before it goes.
 	ConvertedOutputFile string
@@ -249,10 +245,6 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		Properties:         properties,
 	}
 
-	cfg.ApplyVEXOnly, err = parseBool("apply-vex-only", input("apply-vex-only"), false)
-	if err != nil {
-		fail("%s", err)
-	}
 	cfg.UploadVulnerabilities, err = parseBool("upload-vulnerabilities", input("upload-vulnerabilities"), false)
 	if err != nil {
 		fail("%s", err)
@@ -265,19 +257,6 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 
 	// Everything the upload needs is read and validated here, before the version is created. A report that cannot be converted, or a VEX document with an unmappable value, has to fail before anything is published: a version created and then found to be un-uploadable is the half-published state the whole ordering exists to prevent.
 	switch {
-	case cfg.ApplyVEXOnly:
-		// Standalone VEX applies assessments to a version's already-recorded findings; it takes no scan and creates no version.
-		if cfg.UploadVulnerabilities || cfg.VulnerabilitiesFile != "" {
-			fail("`apply-vex-only` applies VEX to a version's already-recorded findings and takes no scan report; do not set `upload-vulnerabilities` or `vulnerabilities-file` with it")
-		}
-		if cfg.VEXFile == "" {
-			fail("input `vex-file` is required when `apply-vex-only` is true")
-		} else if entries, err := LoadVEXForApply(cfg.VEXFile); err != nil {
-			fail("%s", err)
-		} else {
-			cfg.VEXEntries = entries
-		}
-
 	case cfg.UploadVulnerabilities:
 		if cfg.VulnerabilitiesFile == "" {
 			fail("input `vulnerabilities-file` is required when `upload-vulnerabilities` is true")
@@ -292,7 +271,7 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 
 	case cfg.VEXFile != "":
 		// A VEX file with nothing to attach it to is a misconfiguration worth naming rather than ignoring: it would otherwise be a triage decision that silently did nothing.
-		fail("input `vex-file` needs a scan to overlay onto: set `upload-vulnerabilities` with `vulnerabilities-file`, or set `apply-vex-only` to apply it on its own")
+		fail("input `vex-file` needs a scan to overlay onto: set `upload-vulnerabilities` with `vulnerabilities-file`")
 	}
 
 	if len(problems) > 0 {

@@ -85,7 +85,7 @@ jobs:
                   errors.append(f"action.yml is missing `branding.{field}`, which the Marketplace requires")
 
           declared = set(meta.get("outputs", {}))
-          expected = {"version", "version-url", "created", "vulnerabilities-uploaded", "analyses-applied", "converted-vulnerabilities-file"}
+          expected = {"version", "version-url", "created", "vulnerabilities-uploaded", "converted-vulnerabilities-file"}
           if declared != expected:
               errors.append(f"declared outputs {sorted(declared)} do not match the documented set {sorted(expected)}")
 
@@ -96,7 +96,7 @@ jobs:
               "is-default", "note", "bom-ref", "hash", "properties", "external-references",
               "build-timestamp", "purl", "cpe", "mime-type", "size", "download-url",
               "upload-vulnerabilities", "vulnerabilities-file", "vulnerabilities-format",
-              "vex-file", "apply-vex-only", "converted-output-file", "if-exists",
+              "vex-file", "converted-output-file", "if-exists",
           }
           if set(inputs) != expected_inputs:
               errors.append(f"declared inputs {sorted(inputs)} do not match the documented set {sorted(expected_inputs)}")
