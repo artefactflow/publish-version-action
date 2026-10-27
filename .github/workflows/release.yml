@@ -265,7 +265,7 @@ jobs:
 
       # Lets users, and the daily integrity check, verify that an image was built by this workflow from this repository: `gh attestation verify oci://<image> --repo <this repository>`.
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-name: ${{ env.IMAGE }}
           subject-digest: ${{ needs.image.outputs.digest }}
