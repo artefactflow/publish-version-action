@@ -184,7 +184,7 @@ func TestForbiddenNamesBothAuthorizationAxes(t *testing.T) {
 	if err == nil {
 		t.Fatal("CreateVersion succeeded on a 403")
 	}
-	for _, want := range []string{"version:write", "vulnerability:write", "artefact:read", "team"} {
+	for _, want := range []string{"version:write", "artefact:read", "team"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error = %v, want it to mention %q", err, want)
 		}

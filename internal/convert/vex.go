@@ -71,16 +71,3 @@ func Overlay(findings []afclient.Vulnerability, entries []VEXEntry) (matched int
 	}
 	return matched, unmatched
 }
-
-// AnalysisInput turns a VEX entry into the body of the standalone PATCH …/analysis call. The API makes state required on that endpoint, so an entry carrying only a justification cannot be applied this way and is an error naming the identifier.
-func (e VEXEntry) AnalysisInput() (afclient.VulnerabilityAnalysisInput, error) {
-	if strings.TrimSpace(e.Analysis.State) == "" {
-		return afclient.VulnerabilityAnalysisInput{}, fmt.Errorf("VEX entry %s has no state; applying VEX on its own updates a finding's state, which the API requires, so a justification alone cannot be applied", e.ID)
-	}
-	return afclient.VulnerabilityAnalysisInput{
-		State:         e.Analysis.State,
-		Justification: e.Analysis.Justification,
-		Response:      e.Analysis.Response,
-		Detail:        e.Analysis.Detail,
-	}, nil
-}

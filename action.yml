@@ -92,10 +92,7 @@ inputs:
     description: 'Override the report format instead of detecting it: native, trivy, grype, or cyclonedx. Leave unset to detect it from the document. A document that does not match the override is an error, not a silent fallback. Environment variable: ARTEFACTFLOW_VULNERABILITIES_FORMAT.'
     required: false
   vex-file:
-    description: 'Path to a CycloneDX VEX document whose assessments are attached to the findings. Supplied alongside a scan, it is merged into the same upload; supplied on its own with apply-vex-only, it triages an already-recorded set. Environment variable: ARTEFACTFLOW_VEX_FILE.'
-    required: false
-  apply-vex-only:
-    description: "Deprecated, to be removed in the next major version. Apply a VEX document's assessments to the version's already-recorded findings without re-scanning. It needs the vulnerability:write scope, which ArtefactFlow does not grant to service accounts, so the action stops before any call. Send VEX with the scan instead: vex-file beside a Trivy, Grype or CycloneDX report, or analysis inside a native report. Defaults to false. Environment variable: ARTEFACTFLOW_APPLY_VEX_ONLY."
+    description: 'Path to a CycloneDX VEX document whose assessments are attached to the findings. Supplied alongside a Trivy, Grype or CycloneDX scan report, it is merged into the same upload. A native report carries its analysis inline and takes no VEX file. Environment variable: ARTEFACTFLOW_VEX_FILE.'
     required: false
   converted-output-file:
     description: 'Path to write the converted native JSON that will be uploaded, so a workflow can inspect or archive it. Written before the upload runs. Environment variable: ARTEFACTFLOW_CONVERTED_OUTPUT_FILE.'
@@ -114,8 +111,6 @@ outputs:
     description: 'true when this run created the version; false when it already existed and if-exists was skip.'
   vulnerabilities-uploaded:
     description: 'true when a vulnerability set was uploaded in this run.'
-  analyses-applied:
-    description: 'Number of VEX assessments applied on the standalone apply-vex-only path; 0 otherwise.'
   converted-vulnerabilities-file:
     description: 'Path the converted native JSON was written to, echoing converted-output-file when it was set; empty otherwise.'
 

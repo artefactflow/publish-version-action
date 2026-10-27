@@ -57,10 +57,6 @@ func run() error {
 	}
 	fmt.Printf("Authenticated service account %s\n", cfg.ClientID)
 
-	if err := action.CheckVEXScope(cfg, token); err != nil {
-		return err
-	}
-
 	client, err := afclient.New(cfg.APIURL, token)
 	if err != nil {
 		return err
@@ -72,22 +68,6 @@ func run() error {
 		return err
 	}
 	fmt.Printf("Resolved artefact %s to %s\n", cfg.ArtefactName, artefactID)
-
-	// The standalone VEX path applies assessments to an already-recorded set; it neither creates a version nor uploads a scan.
-	if cfg.ApplyVEXOnly {
-		res, applyErr := action.ApplyVEX(ctx, cfg, artefactID, client, os.Stdout)
-		if err := writeOutputs(action.Outputs(res)); err != nil {
-			if applyErr != nil {
-				return fmt.Errorf("%w (additionally, writing the action outputs failed: %v)", applyErr, err)
-			}
-			return err
-		}
-		if applyErr != nil {
-			return applyErr
-		}
-		fmt.Printf("publish-version %s: applied %d VEX assessment(s) to %s of %s\n", version, res.AnalysesApplied, res.Version, cfg.ArtefactName)
-		return nil
-	}
 
 	// Write the converted set before publishing, so a workflow that asked to inspect it has it even if the upload later fails. Only meaningful when a set was actually prepared.
 	if cfg.UploadVulnerabilities {

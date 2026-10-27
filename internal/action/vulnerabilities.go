@@ -87,23 +87,6 @@ func LoadAndConvert(scanPath, formatOverride, vexPath string) (PreparedVulnerabi
 	return prepared, nil
 }
 
-// LoadVEXForApply reads a CycloneDX VEX document for the standalone path and checks every entry can be applied: the PATCH endpoint requires a state, so a VEX entry carrying only a justification is rejected here rather than part-way through applying the rest.
-func LoadVEXForApply(vexPath string) ([]convert.VEXEntry, error) {
-	entries, err := loadVEX(vexPath)
-	if err != nil {
-		return nil, err
-	}
-	if len(entries) == 0 {
-		return nil, fmt.Errorf("VEX file %s records no assessments; there is nothing to apply", vexPath)
-	}
-	for _, e := range entries {
-		if _, err := e.AnalysisInput(); err != nil {
-			return nil, err
-		}
-	}
-	return entries, nil
-}
-
 // WriteConvertedOutput writes the wire body as indented JSON, so a workflow that asked for it can inspect or archive exactly what was uploaded. It is a no-op when path is empty.
 func WriteConvertedOutput(path string, body afclient.VulnerabilitiesInput) error {
 	if path == "" {

@@ -26,11 +26,6 @@ type stubAPI struct {
 	// uploadedFor is the version the upload was addressed to, which must be the version that was just created.
 	uploadedFor string
 	uploadedSet afclient.VulnerabilitiesInput
-
-	// analysisErrByID lets a test make one identifier's PATCH fail (a 404 for a missing finding, say) while the rest succeed.
-	analysisErrByID map[string]error
-	// analysisApplied records the identifiers whose PATCH succeeded, in call order.
-	analysisApplied []string
 }
 
 func (s *stubAPI) CreateVersion(_ context.Context, artefactID string, in afclient.VersionInput) (*afclient.Version, string, error) {
@@ -49,14 +44,6 @@ func (s *stubAPI) ReplaceVulnerabilities(_ context.Context, _, versionValue stri
 	s.uploadCalls++
 	s.uploadedFor, s.uploadedSet = versionValue, in
 	return s.uploadErr
-}
-
-func (s *stubAPI) UpdateVulnerabilityAnalysis(_ context.Context, _, _, vulnerabilityID string, _ afclient.VulnerabilityAnalysisInput) error {
-	if err := s.analysisErrByID[vulnerabilityID]; err != nil {
-		return err
-	}
-	s.analysisApplied = append(s.analysisApplied, vulnerabilityID)
-	return nil
 }
 
 func testConfig() Config {

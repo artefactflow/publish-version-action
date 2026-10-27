@@ -177,11 +177,3 @@ type Analysis struct {
 	Response      []string `json:"response,omitempty"`
 	Detail        string   `json:"detail,omitempty"`
 }
-
-// VulnerabilityAnalysisInput is the body of the PATCH …/analysis endpoint, used to apply a VEX assessment to one already-recorded finding without re-scanning. Unlike Analysis, the API makes `state` required here: a VEX entry carrying only a justification cannot be applied through this path.
-type VulnerabilityAnalysisInput struct {
-	State         string   `json:"state"`
-	Justification string   `json:"justification,omitempty"`
-	Response      []string `json:"response,omitempty"`
-	Detail        string   `json:"detail,omitempty"`
-}

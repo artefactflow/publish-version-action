@@ -80,18 +80,3 @@ func TestOverlayReportsUnmatched(t *testing.T) {
 		t.Errorf("analysis was not attached to the matched finding: %+v", findings[0].Analysis)
 	}
 }
-
-// The standalone PATCH endpoint requires a state, so a VEX entry carrying only a justification cannot be applied that way and is an error.
-func TestAnalysisInputRequiresState(t *testing.T) {
-	_, err := VEXEntry{ID: "CVE-1", Analysis: afclient.Analysis{Justification: "code_not_reachable"}}.AnalysisInput()
-	if err == nil || !strings.Contains(err.Error(), "no state") {
-		t.Fatalf("error = %v, want it to require a state", err)
-	}
-	in, err := VEXEntry{ID: "CVE-1", Analysis: afclient.Analysis{State: "not_affected", Justification: "code_not_reachable"}}.AnalysisInput()
-	if err != nil {
-		t.Fatalf("AnalysisInput: %v", err)
-	}
-	if in.State != "not_affected" || in.Justification != "code_not_reachable" {
-		t.Errorf("input = %+v", in)
-	}
-}

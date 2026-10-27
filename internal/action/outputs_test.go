@@ -19,7 +19,6 @@ func TestOutputs(t *testing.T) {
 		"version-url":                    "https://api.artefactflow.app/v1/artefacts/0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b/versions/1.4.2",
 		"created":                        "true",
 		"vulnerabilities-uploaded":       "false",
-		"analyses-applied":               "0",
 		"converted-vulnerabilities-file": "",
 	}
 	if len(got) != len(want) {

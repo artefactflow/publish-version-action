@@ -58,7 +58,6 @@ That records `1.4.2` with the commit, branch, run id and run number of the workf
 | `vulnerabilities-file` | when uploading | none | `ARTEFACTFLOW_VULNERABILITIES_FILE` | Path to the report: Trivy, Grype, CycloneDX, or native (detected automatically) |
 | `vulnerabilities-format` | no | detected | `ARTEFACTFLOW_VULNERABILITIES_FORMAT` | Force the format: `native`, `trivy`, `grype`, or `cyclonedx` |
 | `vex-file` | no | none | `ARTEFACTFLOW_VEX_FILE` | Path to a CycloneDX VEX document to attach to the findings |
-| `apply-vex-only` | no | `false` | `ARTEFACTFLOW_APPLY_VEX_ONLY` | Deprecated: apply a VEX document to already-recorded findings, creating no version. Needs a scope service accounts cannot hold; see [VEX](#vex-attaching-triage-to-findings) |
 | `converted-output-file` | no | none | `ARTEFACTFLOW_CONVERTED_OUTPUT_FILE` | Write the converted native JSON here before uploading it |
 | `if-exists` | no | `fail` | `ARTEFACTFLOW_IF_EXISTS` | `fail` or `skip` when the version already exists |
 
@@ -157,7 +156,6 @@ jobs:
 | `version-url` | API URL of the version |
 | `created` | `true` when this run created the version; `false` when it already existed and `if-exists` was `skip` |
 | `vulnerabilities-uploaded` | `true` when a vulnerability set was uploaded in this run |
-| `analyses-applied` | Number of VEX assessments applied on the `apply-vex-only` path; `0` otherwise |
 | `converted-vulnerabilities-file` | Path the converted native JSON was written to, when `converted-output-file` was set |
 
 Outputs are written even when the step fails. If the version is created and the vulnerability upload then fails, `created` is still `true`: the rest of your workflow should not have to guess what state the artefact is in.
@@ -230,22 +228,7 @@ VEX is a **separate input from the scan**, because it is an overlay rather than 
 
 Each VEX entry is matched to a finding by vulnerability identifier and contributes its `state`, `justification`, `response`, and `detail`. A `state` or `justification` the API does not accept is an error naming the finding, not a silent drop. An assessment matching no finding is reported as a warning: it usually means the scan and the VEX are from different builds.
 
-When findings are already recorded and you only want to re-triage them (no new scan, no new version), use `apply-vex-only`:
-
-```yaml
-- uses: artefactflow/publish-version-action@v1
-  with:
-    client-id: ${{ secrets.ARTEFACTFLOW_CLIENT_ID }}
-    client-secret: ${{ secrets.ARTEFACTFLOW_CLIENT_SECRET }}
-    artefact-name: acme-payment-service
-    version: 1.4.2
-    apply-vex-only: true
-    vex-file: vex.json
-```
-
-This applies each assessment to the finding already recorded for that identifier, one at a time, and creates nothing. It is not atomic across findings: the action reports how many were applied, warns about any that matched no recorded finding, and fails the run (without reporting success) if any assessment could not be applied, so a half-applied set is never mistaken for a clean one. Applying VEX this way updates a finding's state, which the API requires, so a VEX entry carrying only a justification cannot be applied on its own.
-
-**`apply-vex-only` is deprecated and will be removed in the next major version.** It needs the `vulnerability:write` scope, which ArtefactFlow does not grant to service accounts: changing the triage of recorded findings is kept to people. The action reads its token's scopes and stops with that explanation before making any call. To record VEX from a pipeline, send it with the scan instead: as `vex-file` beside a Trivy, Grype or CycloneDX report, or as `analysis` inside a native report. Either way it travels in the upload, which `version:write` covers.
+A native report takes no `vex-file`: it carries each finding's `analysis` inline, so that is where its assessments go. Either way the triage travels in the upload, which `version:write` covers. Changing the triage of findings that are already recorded is not something this action does: it needs `vulnerability:write`, which ArtefactFlow does not grant to service accounts, so it is kept to people working in ArtefactFlow itself.
 
 ## Re-runs, and versions that already exist
 
@@ -358,7 +341,7 @@ The client id is not sensitive, so a repository or organisation **variable** is 
 
 ### Scopes and team access
 
-The service account needs `artefact:read` to resolve the name and `version:write` to create the version. `version:write` also covers uploading vulnerabilities, with any VEX sent in the same upload. The `apply-vex-only` path needs `vulnerability:write` as well, which ArtefactFlow does not grant to service accounts, so that path is not available from a workflow.
+The service account needs `artefact:read` to resolve the name and `version:write` to create the version. `version:write` also covers uploading vulnerabilities, with any VEX sent in the same upload.
 
 A higher action on the same resource covers a lower one: `version:write` and `version:delete` both satisfy `version:read`, and likewise for `artefact:`. Its token will list only the highest action per resource, which is why a working account can show `version:write` and no `version:read` at all.
 
@@ -398,7 +381,7 @@ This is a container action, so it runs on Linux runners only. Windows and macOS 
 | `HTTP 401: the service account cannot mint tokens` | The account was deactivated, or its organisation is inactive |
 | `HTTP 401: the service account has passed its expiry date` | Extend the account's expiry; it is capped at a year |
 | `HTTP 402` | The organisation is over its plan limit. No retry or input change resolves it |
-| `HTTP 403` | Missing `artefact:read` or `version:write`, `apply-vex-only` used (it needs `vulnerability:write`, which a service account cannot hold), or the principal is not on a team with write access to the artefact's group |
+| `HTTP 403` | Missing `artefact:read` or `version:write`, or the principal is not on a team with write access to the artefact's group |
 | `resolve artefact "…": HTTP 404` | No artefact of that name in your organisation. The match is exact and case-sensitive |
 | `upload vulnerabilities for version …: HTTP 404` | The version was deleted between the create and the upload |
 | `version 1.4.2 ... already exists` | The version was published before. Set `if-exists: skip` if a re-run is expected |
