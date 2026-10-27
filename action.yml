@@ -95,7 +95,7 @@ inputs:
     description: 'Path to a CycloneDX VEX document whose assessments are attached to the findings. Supplied alongside a scan, it is merged into the same upload; supplied on its own with apply-vex-only, it triages an already-recorded set. Environment variable: ARTEFACTFLOW_VEX_FILE.'
     required: false
   apply-vex-only:
-    description: "Apply a VEX document's assessments to the version's already-recorded findings without re-scanning. No version is created and no scan is uploaded; only vex-file and the version being addressed are needed. Defaults to false. Environment variable: ARTEFACTFLOW_APPLY_VEX_ONLY."
+    description: "Deprecated, to be removed in the next major version. Apply a VEX document's assessments to the version's already-recorded findings without re-scanning. It needs the vulnerability:write scope, which ArtefactFlow does not grant to service accounts, so the action stops before any call. Send VEX with the scan instead: vex-file beside a Trivy, Grype or CycloneDX report, or analysis inside a native report. Defaults to false. Environment variable: ARTEFACTFLOW_APPLY_VEX_ONLY."
     required: false
   converted-output-file:
     description: 'Path to write the converted native JSON that will be uploaded, so a workflow can inspect or archive it. Written before the upload runs. Environment variable: ARTEFACTFLOW_CONVERTED_OUTPUT_FILE.'

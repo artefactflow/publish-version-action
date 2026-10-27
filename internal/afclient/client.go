@@ -339,8 +339,8 @@ func (e *StatusError) Error() string {
 	case http.StatusPaymentRequired:
 		return fmt.Sprintf("HTTP 402: the organisation is over its plan limit, so no new version can be created. This is a billing limit rather than a workflow problem, and no retry or input change resolves it (%s)", e.detail())
 	case http.StatusForbidden:
-		// Both authorization axes fail with 403, and the scope is the one people check first. Name the team layer explicitly so a correctly-scoped service account is not mistaken for a scope problem. The calls need different scopes, so all three are named.
-		return fmt.Sprintf("HTTP 403: the service account needs the artefact:read scope to look an artefact up by name, version:write to create the version, and vulnerability:write to upload vulnerabilities; its principal must also belong to a team with write access to the artefact's group (%s)", e.detail())
+		// Both authorization axes fail with 403, and the scope is the one people check first. Name the team layer explicitly so a correctly-scoped service account is not mistaken for a scope problem. The calls need different scopes, so all three are named. The vulnerability upload is a version write; only the apply-vex-only PATCH needs vulnerability:write, which ArtefactFlow does not grant to service accounts.
+		return fmt.Sprintf("HTTP 403: the service account needs the artefact:read scope to look an artefact up by name and version:write to create the version and upload its vulnerabilities; apply-vex-only needs vulnerability:write, which a service account cannot be granted. Its principal must also belong to a team with write access to the artefact's group (%s)", e.detail())
 	case http.StatusNotFound:
 		// Deliberately does not name what was missing. Three different calls can 404 (resolving the artefact, and both writes when the version is gone), and each caller wraps this with which one it was.
 		return fmt.Sprintf("HTTP 404: not found on this instance (%s)", e.detail())

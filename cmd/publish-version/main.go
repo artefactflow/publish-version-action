@@ -57,6 +57,10 @@ func run() error {
 	}
 	fmt.Printf("Authenticated service account %s\n", cfg.ClientID)
 
+	if err := action.CheckVEXScope(cfg, token); err != nil {
+		return err
+	}
+
 	client, err := afclient.New(cfg.APIURL, token)
 	if err != nil {
 		return err

@@ -92,6 +92,17 @@ func Publish(ctx context.Context, cfg Config, artefactID string, api API, log io
 	return res, nil
 }
 
+// CheckVEXScope stops the standalone VEX path before its first call when the token cannot do what that path needs. apply-vex-only re-triages recorded findings, which needs vulnerability:write, and ArtefactFlow does not grant that scope to service accounts: triage is kept to people. One clear error up front replaces one 403 per finding. A token whose scopes cannot be read is left to the API to judge.
+func CheckVEXScope(cfg Config, token string) error {
+	if !cfg.ApplyVEXOnly {
+		return nil
+	}
+	if granted, known := afclient.TokenGrants(token, "vulnerability:write"); known && !granted {
+		return fmt.Errorf("apply-vex-only needs the vulnerability:write scope, which ArtefactFlow does not grant to service accounts: changing the triage of recorded findings is kept to people. To record VEX from a workflow, send it with the scan (`upload-vulnerabilities: true`): as `vex-file` beside a Trivy, Grype or CycloneDX report, or as `analysis` inside a native report. Either way it travels in the upload, which version:write covers")
+	}
+	return nil
+}
+
 // ApplyVEX is the standalone VEX path: it applies each assessment to a finding already recorded against the version, via PATCH, touching only the findings named. It creates no version and uploads no scan: it operates on the set already there.
 //
 // The path is not atomic across findings, so a partial failure is reported as one: the assessments that applied stand, and the run fails naming those that did not, rather than reporting success over a half-applied set. An assessment whose finding is not recorded (a 404) is a mismatch, reported as a warning rather than a failure: it usually means the VEX and the recorded findings are from different builds.
