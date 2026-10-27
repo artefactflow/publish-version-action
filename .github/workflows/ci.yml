@@ -18,7 +18,7 @@ jobs:
     name: Build and test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v5
         with:
@@ -47,7 +47,7 @@ jobs:
     # The action is a container action, so a Dockerfile that no longer builds breaks every consumer. Validate it on every change; nothing is pushed here.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: docker/setup-buildx-action@v3
 
@@ -63,7 +63,7 @@ jobs:
     name: Action metadata
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Marketplace rejects a release whose action.yml is malformed, and it does so only at publish time. Catching it here keeps that failure off the release path.
       - name: Validate action.yml
@@ -121,7 +121,7 @@ jobs:
     # Do not add service containers to this job. They would put the action on a per-job network, and the stub address resolved below assumes the default bridge.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Once action.yml references a published image, `uses: ./` would pull that image and test the last release instead of this pull request, passing no matter what the diff does to the code. Staging a copy whose action.yml builds from the Dockerfile keeps the smoke test pointed at the source under review.
       #

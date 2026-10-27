@@ -36,7 +36,7 @@ jobs:
       tag: ${{ steps.resolve.outputs.tag }}
       major: ${{ steps.resolve.outputs.major }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.tag || github.ref }}
 
@@ -104,7 +104,7 @@ jobs:
     outputs:
       digest: ${{ steps.existing.outputs.digest || steps.build.outputs.digest }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.verify.outputs.tag }}
           persist-credentials: false
@@ -168,7 +168,7 @@ jobs:
       purl: ${{ steps.scan.outputs.purl }}
     steps:
       # The gate script comes from the release tag. A tag cut before the script existed cannot be released by this workflow; that fails closed.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.verify.outputs.tag }}
           persist-credentials: false
@@ -279,7 +279,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.verify.outputs.tag }}
           fetch-depth: 0
@@ -337,7 +337,7 @@ jobs:
       contents: read
     steps:
       # This repository records its own releases with the action at the tag being released, so the first release does not depend on a v1 that it is itself about to create.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.verify.outputs.tag }}
           persist-credentials: false
