@@ -1,6 +1,6 @@
 name: Scanner drift
 
-# Scanners move. This job scans a fixed, digest-pinned target with the current Trivy and Grype and converts the result with this action's own converters, so that a scanner changing its output shape is caught here (by us) rather than in a customer's pipeline. It runs on a schedule and on demand; it never runs on a pull request, because it depends on the scanners' latest releases rather than on the diff.
+# Scanners move. This job scans two fixed targets with the current Trivy and Grype and converts the result with this action's own converters, so that a scanner changing its output shape is caught here (by us) rather than in a customer's pipeline. It runs on a schedule and on demand; it never runs on a pull request, because it depends on the scanners' latest releases rather than on the diff.
 
 on:
   schedule:
@@ -15,9 +15,12 @@ concurrency:
   group: scanner-drift
   cancel-in-progress: false
 
+# The drift tests read both targets below to name the one to replace when a scan comes back empty. Neither is vulnerable forever: advisories can be withdrawn, and a distribution's are dropped from the scanners' databases once it reaches end of life (alpine:3.14 found nothing for exactly that reason). An empty scan fails with a message saying so, distinct from drift.
 env:
-  # A small, deliberately outdated image so the scan reliably finds known vulnerabilities. Alpine 3.14 is end-of-life, so the tag is effectively fixed: the scanners are what this job watches for drift, not the target. Pin to a digest (`alpine:3.14@sha256:…`) if you want the target frozen exactly.
-  TARGET_IMAGE: 'alpine:3.14'
+  # Language packages: a go.mod pinning dependencies below several well-known Go advisories, so losing one or two still leaves findings.
+  TARGET_FIXTURE: .github/scanner-drift/go.mod.fixture
+  # Distribution packages: a dated Ubuntu 24.04 snapshot, pinned by digest so the target cannot change under the job. 24.04 is supported until 2029; replace it with a newer LTS snapshot before then.
+  TARGET_IMAGE: 'ubuntu:noble-20240423@sha256:562456a05a0dbd62a671c1854868862a4687bf979a96d48ae8e766642cd911e8'
 
 jobs:
   drift:
@@ -44,16 +47,27 @@ jobs:
           trivy --version
           grype version
 
-      - name: Scan the pinned target
+      # The fixture is copied to go.mod in a scratch directory, so the scanners see an ordinary Go module and nothing else from the repository. Neither scan step uses --quiet: a scanner warning (for example about missing vulnerability data) is the first clue when this job fails.
+      - name: Scan the language-package target
         run: |
-          trivy image --quiet --format json --output "$RUNNER_TEMP/trivy.json" "$TARGET_IMAGE"
-          grype "$TARGET_IMAGE" -o json > "$RUNNER_TEMP/grype.json"
+          target="$RUNNER_TEMP/drift-target"
+          mkdir -p "$target"
+          cp "$TARGET_FIXTURE" "$target/go.mod"
+          trivy fs --scanners vuln --format json --output "$RUNNER_TEMP/trivy.json" "$target"
+          grype "dir:$target" -o json > "$RUNNER_TEMP/grype.json"
+
+      - name: Scan the OS-package target
+        run: |
+          trivy image --scanners vuln --format json --output "$RUNNER_TEMP/trivy-image.json" "$TARGET_IMAGE"
+          grype "$TARGET_IMAGE" -o json > "$RUNNER_TEMP/grype-image.json"
 
       # The drift tests skip themselves unless these point at fresh reports, so they are a no-op in ordinary CI and a real check here. A failure means the latest scanner output no longer converts to a complete finding set, the signal to update the converters before it reaches anyone.
       - name: Convert and verify
         env:
           DRIFT_TRIVY_REPORT: ${{ runner.temp }}/trivy.json
           DRIFT_GRYPE_REPORT: ${{ runner.temp }}/grype.json
+          DRIFT_TRIVY_IMAGE_REPORT: ${{ runner.temp }}/trivy-image.json
+          DRIFT_GRYPE_IMAGE_REPORT: ${{ runner.temp }}/grype-image.json
         run: go test ./internal/convert -run TestDrift -v
 
       - name: Upload the reports on failure
@@ -64,4 +78,6 @@ jobs:
           path: |
             ${{ runner.temp }}/trivy.json
             ${{ runner.temp }}/grype.json
+            ${{ runner.temp }}/trivy-image.json
+            ${{ runner.temp }}/grype-image.json
           retention-days: 14

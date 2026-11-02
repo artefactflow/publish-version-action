@@ -13,7 +13,7 @@ If the vulnerability is being exploited right now, or you believe a release, tag
 
 Include what you did, what happened, and what you expected: a minimal reproduction is worth more than anything else. You will get an acknowledgement, and we will keep you updated as the report is triaged and fixed. Please give us a chance to ship a fix before disclosing publicly.
 
-Our [Vulnerability Disclosure Policy](https://www.artefactflow.com/legal) covers this action: what is in scope, what we commit to, and the safe harbour for good-faith research.
+Our [Vulnerability Disclosure Policy](https://www.artefactflow.com/legal/vulnerability-disclosure-policy/) covers this action: what is in scope, what we commit to, and the safe harbour for good-faith research.
 
 ## Security advisories
 
