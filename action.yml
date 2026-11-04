@@ -1,6 +1,6 @@
 # Marketplace requires action.yml at the repository root, which is why this action lives in its own repository.
 name: 'ArtefactFlow Publish Version'
-description: 'Create a version of an ArtefactFlow artefact from your CI build metadata, and optionally upload that version''s vulnerabilities in the same step.'
+description: 'Create an ArtefactFlow artefact version from CI build metadata, optionally uploading its vulnerabilities in the same step.'
 author: 'ArtefactFlow'
 
 branding:
@@ -119,4 +119,4 @@ runs:
   # One exact, immutable image version, published by the release workflow and bumped as part of cutting each release.
   #
   # Exact, not a floating `:1`. A consumer who pins `uses: ...@v1.2.0` or a commit SHA expects to keep running that code; a floating tag would silently hand them a newer image and make pinning meaningless. The release workflow refuses to publish if this reference and the release tag disagree.
-  image: 'docker://ghcr.io/artefactflow/publish-version-action:1.0.0'
+  image: 'docker://ghcr.io/artefactflow/publish-version-action:1.0.1'

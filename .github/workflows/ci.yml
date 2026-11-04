@@ -79,6 +79,11 @@ jobs:
               if not meta.get(field):
                   errors.append(f"action.yml is missing the required `{field}` field")
 
+          # The Marketplace refuses a description of 125 characters or more, and only says so when the release is published to it.
+          description = meta.get("description") or ""
+          if len(description) >= 125:
+              errors.append(f"description is {len(description)} characters; the Marketplace requires fewer than 125")
+
           branding = meta.get("branding") or {}
           for field in ("icon", "color"):
               if not branding.get(field):
