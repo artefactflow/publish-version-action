@@ -116,9 +116,7 @@ outputs:
 
 runs:
   using: 'docker'
-  # Built from source on the runner until the first release publishes an image. From then on this references one exact, immutable image version, which is bumped as part of cutting a release:
-  #
-  #   image: 'docker://ghcr.io/artefactflow/publish-version-action:1.2.3'
+  # One exact, immutable image version, published by the release workflow and bumped as part of cutting each release.
   #
   # Exact, not a floating `:1`. A consumer who pins `uses: ...@v1.2.0` or a commit SHA expects to keep running that code; a floating tag would silently hand them a newer image and make pinning meaningless. The release workflow refuses to publish if this reference and the release tag disagree.
-  image: 'Dockerfile'
+  image: 'docker://ghcr.io/artefactflow/publish-version-action:1.0.0'

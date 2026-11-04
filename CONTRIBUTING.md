@@ -97,10 +97,9 @@ Between steps 2 and 3 the tag exists but its image does not, so the action is br
 
 ### The first release
 
-The first release is the exception: no image exists yet, so `action.yml` stays on `image: 'Dockerfile'` and the workflow emits a notice rather than failing. That release builds on the runner for anyone who uses it. Immediately afterwards:
+The first release follows the same steps. No image exists yet when you commit, but the release workflow pushes and tags the image before it creates the GitHub release and moves the major tag, so `action.yml` can already name the image of the version being released. Immediately after the first run:
 
 1. Confirm the package is **public**: GHCR packages are not reliably public just because the repository is, and a private image fails for every consumer with an unauthorized pull. Check under the organisation's Packages settings.
-2. Switch `action.yml` to `docker://ghcr.io/artefactflow/publish-version-action:<that version>` and cut the next release normally.
 
 Listing on the Marketplace is a manual step on the first release only: open the release, choose **Edit**, and tick **Publish this Action to the GitHub Marketplace**.
 
