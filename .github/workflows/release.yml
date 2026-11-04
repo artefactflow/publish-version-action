@@ -2,19 +2,9 @@ name: Release
 
 # Publishes a release of the action: the container image it runs, its SBOM, the GitHub release, and the moving major tag consumers pin to.
 #
-# The tag trigger is deliberately commented out while the action is still being built, so no accidental push can publish. Enable it by uncommenting the `push:` block below; until then the workflow only ever runs when someone starts it by hand.
+# A tag push does not start this workflow, so an accidental tag cannot publish. Start it by hand and choose the release tag (not a branch) under "Use workflow from"; the release is published from that tag. To publish on every tag push instead, uncomment the `push:` block below.
 on:
   workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Existing release tag to publish, for example v1.0.0. Create and push the tag first.'
-        required: true
-        type: string
-      dry-run:
-        description: 'Build everything but publish nothing.'
-        required: false
-        type: boolean
-        default: true
   # push:
   #   tags: ["v*"]
 
@@ -37,15 +27,18 @@ jobs:
       major: ${{ steps.resolve.outputs.major }}
     steps:
       - uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.tag || github.ref }}
 
       - name: Resolve the release tag
         id: resolve
         env:
-          # A dispatch supplies the tag as an input; a tag push carries it in the ref.
-          RAW_TAG: ${{ inputs.tag || github.ref_name }}
+          # The tag chosen under "Use workflow from", or the pushed tag.
+          RAW_TAG: ${{ github.ref_name }}
         run: |
+          # A manual run can be started from a branch, which would publish a release named after the branch.
+          if [ "$GITHUB_REF_TYPE" != tag ]; then
+            echo "::error::run this workflow from a release tag (for example v1.2.3), chosen under \"Use workflow from\", not from the branch '$RAW_TAG'"
+            exit 1
+          fi
           if ! printf '%s' "$RAW_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
             echo "::error::'$RAW_TAG' is not a v-prefixed SemVer tag (for example v1.2.3)"
             exit 1
@@ -114,7 +107,6 @@ jobs:
       - uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
-        if: ${{ !inputs.dry-run }}
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -124,7 +116,6 @@ jobs:
       # An image version is immutable: the release tag's action.yml pins it, and a user who pins that tag expects the exact image that was checked. A re-run for the same tag therefore re-uses the image that is already published instead of rebuilding it from newer base layers.
       - name: Re-use an existing image for this version
         id: existing
-        if: ${{ !inputs.dry-run }}
         env:
           TAG: ${{ needs.verify.outputs.tag }}
         run: |
@@ -149,7 +140,7 @@ jobs:
           context: .
           # A container action only ever runs on a Linux runner, but arm64 runners are Linux too.
           platforms: linux/amd64,linux/arm64
-          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=${{ !inputs.dry-run }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             VERSION=${{ needs.verify.outputs.tag }}
@@ -157,8 +148,6 @@ jobs:
   sbom:
     name: SBOM and vulnerability gate
     needs: [verify, image]
-    # Scans the image that was just pushed, so there is nothing to scan on a dry run.
-    if: ${{ !inputs.dry-run }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -228,7 +217,6 @@ jobs:
   promote:
     name: Tag and attest the image
     needs: [verify, image, sbom]
-    if: ${{ !inputs.dry-run }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -274,7 +262,6 @@ jobs:
   release:
     name: Publish release
     needs: [verify, sbom, promote]
-    if: ${{ !inputs.dry-run }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -331,7 +318,7 @@ jobs:
     name: Record the release in ArtefactFlow
     needs: [verify, image, sbom, release]
     # Bookkeeping, not a gate: it runs after the release, so an ArtefactFlow outage or a missing service account never holds a release back. Skipped until the repository has the ARTEFACTFLOW_CLIENT_ID variable and the ARTEFACTFLOW_CLIENT_SECRET secret, and the artefact named after this repository exists in ArtefactFlow.
-    if: ${{ !inputs.dry-run && vars.ARTEFACTFLOW_CLIENT_ID != '' }}
+    if: ${{ vars.ARTEFACTFLOW_CLIENT_ID != '' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

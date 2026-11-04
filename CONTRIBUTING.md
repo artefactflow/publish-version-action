@@ -91,7 +91,7 @@ So each release is:
 
 1. Update `runs.image` in `action.yml` to the version being released, and commit.
 2. Tag that commit (`git tag v1.2.3`) and push the tag.
-3. Run the `Release` workflow against the tag, with **dry-run off**.
+3. Run the `Release` workflow, choosing the tag (not a branch) under **Use workflow from**. There is nothing else to fill in.
 
 Between steps 2 and 3 the tag exists but its image does not, so the action is briefly unusable at that ref. Nothing consumes a tag before its release exists, so this is safe, but do not leave the gap open longer than necessary.
 
