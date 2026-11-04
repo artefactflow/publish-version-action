@@ -2,11 +2,18 @@ name: Release
 
 # Publishes a release of the action: the container image it runs, its SBOM, the GitHub release, and the moving major tag consumers pin to.
 #
-# A tag push does not start this workflow, so an accidental tag cannot publish. Start it by hand and choose the release tag (not a branch) under "Use workflow from"; the release is published from that tag. To publish on every tag push instead, uncomment the `push:` block below.
+# Pushing a release tag (v1.2.3, or a pre-release such as v1.2.3-rc.1) starts this workflow. The moving major tag (v1) does not match the pattern, and this workflow moves it with GITHUB_TOKEN, which never starts another run. A tag whose action.yml names a different image fails in the first job, before anything is published. To re-run a release, start it by hand and choose the tag (not a branch) under "Use workflow from".
 on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
   workflow_dispatch:
-  # push:
-  #   tags: ["v*"]
+
+# A push and a manual re-run of the same tag queue behind each other instead of publishing side by side.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -31,7 +38,7 @@ jobs:
       - name: Resolve the release tag
         id: resolve
         env:
-          # The tag chosen under "Use workflow from", or the pushed tag.
+          # The pushed tag, or the tag chosen under "Use workflow from" for a re-run.
           RAW_TAG: ${{ github.ref_name }}
         run: |
           # A manual run can be started from a branch, which would publish a release named after the branch.

@@ -90,10 +90,9 @@ Releases are cut by maintainers from the `Release` workflow. It re-runs the test
 So each release is:
 
 1. Update `runs.image` in `action.yml` to the version being released, and commit.
-2. Tag that commit (`git tag v1.2.3`) and push the tag.
-3. Run the `Release` workflow, choosing the tag (not a branch) under **Use workflow from**. There is nothing else to fill in.
+2. Tag that commit (`git tag v1.2.3`) and push the tag. Pushing the tag starts the `Release` workflow.
 
-Between steps 2 and 3 the tag exists but its image does not, so the action is briefly unusable at that ref. Nothing consumes a tag before its release exists, so this is safe, but do not leave the gap open longer than necessary.
+Until the workflow finishes, the tag exists but its image does not, so the action is briefly unusable at that ref. Nothing consumes a tag before its release exists, so this is safe. To re-run a release, start the `Release` workflow by hand and choose the tag (not a branch) under **Use workflow from**.
 
 ### The first release
 
