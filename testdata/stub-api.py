@@ -9,8 +9,20 @@ It is deliberately strict about the things the action could get wrong silently:
 the token endpoint checks the credentials, the write endpoints reject a request
 that does not present the minted token, the create body is checked for the
 provenance the action is supposed to derive from the workflow context, creating
-the same version twice returns 409, and vulnerabilities cannot be uploaded for a
-version that was never created. Each of those would otherwise pass unnoticed.
+the same version twice returns 409, a scan report cannot be imported onto a
+version that was never created, and the import must arrive as multipart form
+data with JSON parts. Each of those would otherwise pass unnoticed.
+
+It does not convert reports: that is ArtefactFlow's job, tested there. It only
+recognises a report's format and lists the identifiers in it, which is enough
+for the action's own behaviour (the dry run, the converted file, the summary in
+the step log) to be exercised. It recognises Trivy, Grype, CycloneDX and native
+reports only; a SARIF, OSV-Scanner, GitLab or Snyk report is refused here even
+though ArtefactFlow reads it. Like ArtefactFlow it refuses a VEX document sent
+beside a native report, and it echoes `producer` and `producer_version`.
+
+It never answers 413 or 429: the size limit and the import gate's
+`Retry-After` are covered by the Go unit tests, not by the smoke test.
 
     python3 testdata/stub-api.py [port]
 """
@@ -18,7 +30,10 @@ version that was never created. Each of those would otherwise pass unnoticed.
 import json
 import re
 import sys
+from email import policy
+from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs
 
 CLIENT_ID = "0198e2c3-9a21-7b8e-90f5-6c1d4e2a83b0"
 CLIENT_SECRET = "afsa_stub-client-secret"
@@ -28,15 +43,47 @@ ARTEFACT_ID = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"
 ARTEFACT_NAME = "acme-payment-service"
 
 CREATE_PATH = re.compile(rf"^/v1/artefacts/{ARTEFACT_ID}/versions$")
-VULNS_PATH = re.compile(rf"^/v1/artefacts/{ARTEFACT_ID}/versions/([^/]+)/vulnerabilities$")
+IMPORT_PATH = re.compile(rf"^/v1/artefacts/{ARTEFACT_ID}/versions/([^/]+)/vulnerabilities/import$")
 
 # Fields the action must always derive from the workflow context, whether or not the workflow set them explicitly.
 REQUIRED_CREATE_FIELDS = ("version", "commit_sha", "build_id", "pipeline_id", "builder")
 
-# Creating this version succeeds but uploading its vulnerabilities always fails, so the smoke test can exercise the one failure the action must report unambiguously: the version exists, only the upload needs re-running.
+# Creating this version succeeds but importing its scan report always fails, so the smoke test can exercise the one failure the action must report unambiguously: the version exists, only the upload needs re-running. The failure is a 500, which the action retries (three attempts with backoff) before it gives up and fails the step.
 UPLOAD_FAILS_FOR_VERSION = "9.9.9"
 
 created_versions = set()
+
+
+def multipart_parts(content_type, body):
+    """The parts of a multipart/form-data body, as {name: (content type, bytes)}."""
+    message = BytesParser(policy=policy.HTTP).parsebytes(
+        b"Content-Type: " + content_type.encode() + b"\r\n\r\n" + body
+    )
+    if not message.is_multipart():
+        return None
+    parts = {}
+    for part in message.iter_parts():
+        name = part.get_param("name", header="content-disposition")
+        parts[name] = (part.get_content_type(), part.get_payload(decode=True))
+    return parts
+
+
+def report_findings(report):
+    """The report's format and the identifiers it names, or (None, None) for a document of no known format."""
+    if isinstance(report, list):
+        return "native", [v.get("id") for v in report]
+    if not isinstance(report, dict):
+        return None, None
+    if "SchemaVersion" in report and "Results" in report:
+        ids = [v.get("VulnerabilityID") for r in report.get("Results") or [] for v in r.get("Vulnerabilities") or []]
+        return "trivy", ids
+    if "matches" in report:
+        return "grype", [m.get("vulnerability", {}).get("id") for m in report.get("matches") or []]
+    if "bomFormat" in report:
+        return "cyclonedx", [v.get("id") for v in report.get("vulnerabilities") or []]
+    if "vulnerabilities" in report:
+        return "native", [v.get("id") for v in report.get("vulnerabilities") or []]
+    return None, None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -65,7 +112,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _error(self, status, code, message):
-        self._send(status, {"code": code, "message": message, "logid": "stub-log-id"})
+        self._send(status, {"code": code, "message": message, "log_id": "stub-log-id"})
 
     def _drain(self):
         """Read and discard any unread request body. Safe to call more than once."""
@@ -107,6 +154,11 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {"access_token": MINTED_TOKEN, "expire_in": 300, "token_type": "Bearer"})
             return
 
+        match = IMPORT_PATH.match(path)
+        if match:
+            self._import(match.group(1))
+            return
+
         if CREATE_PATH.match(path):
             if not self._authorised():
                 return
@@ -137,35 +189,71 @@ class Handler(BaseHTTPRequestHandler):
 
         self._error(404, "GEN00404", "No such endpoint")
 
-    def do_PUT(self):
-        path = self.path.split("?", 1)[0]
-
-        match = VULNS_PATH.match(path)
-        if not match:
-            self._error(404, "GEN00404", "No such endpoint")
-            return
+    def _import(self, version):
         if not self._authorised():
             return
-
-        version = match.group(1)
         if version == UPLOAD_FAILS_FOR_VERSION:
-            self._error(500, "VULN00500", "Deliberate upload failure, so the smoke test can check what the action reports")
+            # A 500 is retryable, so the action sends this import three times before failing; the smoke test checks only the outcome after the last one.
+            self._error(500, "VULN00500", "Deliberate import failure, so the smoke test can check what the action reports")
             return
         if version not in created_versions:
-            # Vulnerabilities are keyed by the version's SemVer string, so uploading for a
-            # version that does not exist means the action sequenced the two calls wrongly.
+            # The import addresses the version by its SemVer string, so importing onto one that does not exist means the action sequenced the two calls wrongly.
             self._error(404, "VERSION00404", "No such version; it must be created first")
             return
 
-        body = self._body()
-        if body is None:
+        self._drain()
+        parts = multipart_parts(self.headers.get("Content-Type", ""), self._raw)
+        if parts is None or "report" not in parts:
+            self._error(400, "VULN00001", "The import takes multipart form data with a `report` part")
             return
-        vulns = body.get("vulnerabilities")
-        if not isinstance(vulns, list):
-            # A full replace with a missing or null list would silently clear the set.
-            self._error(422, "VULN00422", "`vulnerabilities` must be an array")
+        documents = {}
+        for name, (content_type, content) in parts.items():
+            if content_type != "application/json":
+                self._error(400, "VULN00001", f"Part `{name}` is {content_type}, want application/json")
+                return
+            try:
+                documents[name] = json.loads(content)
+            except json.JSONDecodeError:
+                self._error(400, "VULN00001", f"Part `{name}` is not JSON")
+                return
+
+        query = parse_qs(self.path.partition("?")[2])
+        fmt, ids = report_findings(documents["report"])
+        if fmt is None or (query.get("format") and query["format"][0] != fmt):
+            self._error(400, "VULN00001", "The report's format was not recognised")
             return
-        self._send(200, {"metadata": {"total_records": len(vulns)}, "vulnerabilities": vulns})
+        if fmt == "native" and "vex" in documents:
+            # As ArtefactFlow does: a native report carries its analysis inline, so a VEX document beside one is a mistake to name, not an overlay to apply.
+            self._error(400, "VULN00001", "A native report carries its analysis inline and takes no `vex` part")
+            return
+        ids = sorted({i for i in ids if i})
+        vex_ids = {v.get("id") for v in (documents.get("vex") or {}).get("vulnerabilities") or []}
+        summary = {"format": fmt, "vex_matched": len(vex_ids & set(ids))}
+        unmatched = sorted(i for i in vex_ids - set(ids) if i)
+        if unmatched:
+            summary["vex_unmatched"] = unmatched
+        producer = (query.get("producer") or [fmt])[0]
+        producer_version = (query.get("producer_version") or [""])[0]
+        findings = [{"id": i, "source": {"name": "NVD"}} for i in ids]
+        for finding in findings:
+            if finding["id"] in vex_ids:
+                finding["analysis"] = {"state": "not_affected"}
+
+        if (query.get("dry_run") or ["false"])[0] == "true":
+            preview = {"producer": producer, "vulnerabilities": findings, "import": summary}
+            if producer_version:
+                preview["producer_version"] = producer_version
+            self._send(200, preview)
+            return
+        recorded_producer = {"name": producer}
+        if producer_version:
+            recorded_producer["version"] = producer_version
+        self._send(200, {
+            "metadata": {"total_records": len(findings)},
+            "vulnerabilities": [dict(f, producers=[producer]) for f in findings[:10]],
+            "producer": recorded_producer,
+            "import": summary,
+        })
 
     def do_GET(self):
         path, _, query = self.path.partition("?")

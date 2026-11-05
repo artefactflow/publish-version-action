@@ -1,4 +1,4 @@
-// Command publish-version is the entry point of the ArtefactFlow publish-version GitHub Action. It reads the action inputs from the environment, creates a version of one artefact from the workflow's build metadata, optionally replaces that version's recorded vulnerabilities, and writes the results to $GITHUB_OUTPUT for later steps to consume.
+// Command publish-version is the entry point of the ArtefactFlow publish-version GitHub Action. It reads the action inputs from the environment, creates a version of one artefact from the workflow's build metadata, optionally imports a scan report onto that version, and writes the results to $GITHUB_OUTPUT for later steps to consume.
 package main
 
 import (
@@ -30,7 +30,8 @@ func run() error {
 	// The runner cancels a job by signalling the container; honouring that stops an in-flight retry loop promptly.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	// The deadline bounds the whole run, so it has to hold the worst case the retry policy allows rather than the usual one: a dry run and the import each get up to three attempts of up to 60 s, with ArtefactFlow asking for a 10 s wait between them while its import gate is full, which comes to about seven minutes before the token exchange, the resolve and the create are counted. Ten minutes leaves that room while still stopping a run that has genuinely hung.
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 
 	cfg, err := action.LoadConfig(os.Getenv)
@@ -68,13 +69,6 @@ func run() error {
 		return err
 	}
 	fmt.Printf("Resolved artefact %s to %s\n", cfg.ArtefactName, artefactID)
-
-	// Write the converted set before publishing, so a workflow that asked to inspect it has it even if the upload later fails. Only meaningful when a set was actually prepared.
-	if cfg.UploadVulnerabilities {
-		if err := action.WriteConvertedOutput(cfg.ConvertedOutputFile, cfg.Vulnerabilities); err != nil {
-			return err
-		}
-	}
 
 	res, publishErr := action.Publish(ctx, cfg, artefactID, client, os.Stdout)
 

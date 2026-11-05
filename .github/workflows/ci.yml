@@ -101,7 +101,7 @@ jobs:
               "is-default", "note", "bom-ref", "hash", "properties", "external-references",
               "build-timestamp", "purl", "cpe", "mime-type", "size", "download-url",
               "upload-vulnerabilities", "vulnerabilities-file", "vulnerabilities-format",
-              "vex-file", "converted-output-file", "if-exists",
+              "vulnerabilities-producer", "vulnerabilities-producer-version", "vex-file", "converted-output-file", "if-exists",
           }
           if set(inputs) != expected_inputs:
               errors.append(f"declared inputs {sorted(inputs)} do not match the documented set {sorted(expected_inputs)}")
@@ -224,7 +224,7 @@ jobs:
           esac
           exit $fail
 
-      # A scanner report converts and uploads in one step, and the converted native JSON is written for inspection. Only a real runner exercises detection, conversion, and the converted-output file through the container entrypoint.
+      # A scanner report is imported with its VEX document in one step, and the dry run's converted native JSON is written for inspection. Only a real runner exercises the multipart import, the dry run, and the converted-output file through the container entrypoint.
       - name: Publish a version from a Trivy report
         id: scan
         uses: ./ci-local-action
@@ -249,7 +249,7 @@ jobs:
           [ "$UPLOADED" = "true" ] || { echo "::error::vulnerabilities-uploaded = '$UPLOADED', expected 'true'"; fail=1; }
           [ "$CONVERTED" = "converted.json" ] || { echo "::error::converted-vulnerabilities-file = '$CONVERTED', expected 'converted.json'"; fail=1; }
           [ -f "converted.json" ] || { echo "::error::converted output file was not written to the workspace"; fail=1; }
-          # The overlaid VEX assessment must survive into the converted native JSON.
+          # The VEX document must have travelled with the report: the stub applies its assessment to the matching finding.
           if [ -f "converted.json" ] && ! grep -q '"not_affected"' converted.json; then
             echo "::error::the VEX analysis was not merged into the converted output"
             fail=1
@@ -277,7 +277,7 @@ jobs:
           fi
 
       # The failure this action exists to make unambiguous: the version is created and the
-      # vulnerability upload then fails. The stub always fails the upload for 9.9.9. The step
+      # import then fails. The stub always fails the import for 9.9.9. The step
       # must fail, and it must still report that the version was created. A workflow left
       # guessing at the artefact's state is the outcome this is all guarding against.
       - name: Publish a version whose vulnerability upload fails

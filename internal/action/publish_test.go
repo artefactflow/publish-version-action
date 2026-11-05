@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -20,12 +21,16 @@ const testArtefactID = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"
 type stubAPI struct {
 	createErr   error
 	location    string
-	uploadErr   error
 	createCalls int
+	// uploadErr fails the import that records; dryRunErr fails the dry run.
+	uploadErr   error
+	dryRunErr   error
 	uploadCalls int
-	// uploadedFor is the version the upload was addressed to, which must be the version that was just created.
+	dryRuns     int
+	// uploadedFor is the version the import was addressed to, which must be the version that was just created.
 	uploadedFor string
-	uploadedSet afclient.VulnerabilitiesInput
+	imported    afclient.ImportRequest
+	answer      afclient.ImportResult
 }
 
 func (s *stubAPI) CreateVersion(_ context.Context, artefactID string, in afclient.VersionInput) (*afclient.Version, string, error) {
@@ -40,10 +45,21 @@ func (s *stubAPI) CreateVersion(_ context.Context, artefactID string, in afclien
 	return &afclient.Version{ArtefactID: artefactID, Version: in.Version}, s.location, nil
 }
 
-func (s *stubAPI) ReplaceVulnerabilities(_ context.Context, _, versionValue string, in afclient.VulnerabilitiesInput) error {
+func (s *stubAPI) ImportVulnerabilities(_ context.Context, _, versionValue string, in afclient.ImportRequest) (*afclient.ImportResult, error) {
+	if in.DryRun {
+		s.dryRuns++
+		if s.dryRunErr != nil {
+			return nil, s.dryRunErr
+		}
+		return &afclient.ImportResult{Producer: "trivy", Findings: 1, Document: json.RawMessage(`{"producer":"trivy","vulnerabilities":[{"id":"CVE-1","ratings":[{"score":0.0}]}],"import":{"format":"trivy","vex_matched":0}}`)}, nil
+	}
 	s.uploadCalls++
-	s.uploadedFor, s.uploadedSet = versionValue, in
-	return s.uploadErr
+	s.uploadedFor, s.imported = versionValue, in
+	if s.uploadErr != nil {
+		return nil, s.uploadErr
+	}
+	answer := s.answer
+	return &answer, nil
 }
 
 func testConfig() Config {
@@ -61,14 +77,15 @@ func conflict() error {
 	return errors.Join(afclient.ErrVersionExists, &afclient.StatusError{Status: 409, Code: "VERSION00409", Message: "already exists"})
 }
 
-// withVulnerabilities configures the upload the way LoadConfig would have: the report is already parsed by the time Publish runs.
+// withVulnerabilities configures the import the way LoadConfig would have: the report is already read by the time Publish runs.
 func withVulnerabilities(cfg Config, ids ...string) Config {
 	cfg.UploadVulnerabilities = true
 	cfg.VulnerabilitiesFile = "scan.json"
+	entries := make([]string, 0, len(ids))
 	for _, id := range ids {
-		cfg.Vulnerabilities.Vulnerabilities = append(cfg.Vulnerabilities.Vulnerabilities,
-			json.RawMessage(fmt.Sprintf(`{"id":%q,"source":{"name":"NVD"}}`, id)))
+		entries = append(entries, fmt.Sprintf(`{"id":%q,"source":{"name":"NVD"}}`, id))
 	}
+	cfg.Import = afclient.ImportRequest{Report: []byte(`{"vulnerabilities":[` + strings.Join(entries, ",") + `]}`), ReportName: "scan.json"}
 	return cfg
 }
 
@@ -107,17 +124,127 @@ func TestPublishUploadsAfterCreateForTheSameVersion(t *testing.T) {
 	}
 }
 
-func TestPublishSendsTheCompleteVulnerabilitySet(t *testing.T) {
-	cfg := testConfig()
-	cfg = withVulnerabilities(cfg, "CVE-1", "CVE-2")
+func TestPublishSendsTheReportAsItWasRead(t *testing.T) {
+	cfg := withVulnerabilities(testConfig(), "CVE-1", "CVE-2")
+	cfg.Import.Format, cfg.Import.Producer = "native", "image-scan"
 
-	api := &stubAPI{}
-	if _, err := Publish(context.Background(), cfg, testArtefactID, api, io.Discard); err != nil {
+	api := &stubAPI{answer: afclient.ImportResult{Producer: "image-scan", VersionFindings: 2, Import: afclient.ImportSummary{Format: "native"}}}
+	var log strings.Builder
+	if _, err := Publish(context.Background(), cfg, testArtefactID, api, &log); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
-	// The endpoint is a full replace, so the payload must be exactly what was loaded, never a subset.
-	if len(api.uploadedSet.Vulnerabilities) != 2 {
-		t.Errorf("uploaded %d findings, want the complete set of 2", len(api.uploadedSet.Vulnerabilities))
+	// The import replaces the producer's findings, so what is sent must be exactly the report that was read, with the options the inputs set.
+	if !reflect.DeepEqual(api.imported, cfg.Import) {
+		t.Errorf("imported %+v, want %+v", api.imported, cfg.Import)
+	}
+	if api.dryRuns != 0 {
+		t.Errorf("dry runs = %d, want none without `converted-output-file`", api.dryRuns)
+	}
+	if !strings.Contains(log.String(), "producer image-scan") || !strings.Contains(log.String(), "now holds 2 finding(s)") {
+		t.Errorf("log = %q, want the producer and the version's total", log.String())
+	}
+}
+
+func TestPublishWarnsAboutUnmatchedVEX(t *testing.T) {
+	cfg := withVulnerabilities(testConfig(), "CVE-1")
+	api := &stubAPI{answer: afclient.ImportResult{Producer: "trivy", Import: afclient.ImportSummary{Format: "trivy", VEXUnmatched: []string{"CVE-2024-9"}}}}
+	var log strings.Builder
+	if _, err := Publish(context.Background(), cfg, testArtefactID, api, &log); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if !strings.Contains(log.String(), "::warning::1 VEX assessment(s) matched no finding") || !strings.Contains(log.String(), "CVE-2024-9") {
+		t.Errorf("log = %q, want a warning naming the unmatched assessment", log.String())
+	}
+}
+
+// The unmatched ids are copied from the workflow's VEX document, and the runner reads every log line for workflow commands. An id carrying a line break must not get to start one, and a VEX document from another build must not flood the annotation with hundreds of ids.
+func TestPublishBoundsAndSanitisesUnmatchedVEXIDs(t *testing.T) {
+	unmatched := []string{"CVE-2024-0\n::add-mask::x"}
+	for i := 1; i < 25; i++ {
+		unmatched = append(unmatched, fmt.Sprintf("CVE-2024-%d", i))
+	}
+	cfg := withVulnerabilities(testConfig(), "CVE-1")
+	api := &stubAPI{answer: afclient.ImportResult{Producer: "trivy", Import: afclient.ImportSummary{Format: "trivy", VEXUnmatched: unmatched}}}
+	var log strings.Builder
+	if _, err := Publish(context.Background(), cfg, testArtefactID, api, &log); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	for _, line := range strings.Split(log.String(), "\n") {
+		if strings.HasPrefix(line, "::") && !strings.HasPrefix(line, "::warning::") {
+			t.Errorf("log line %q starts a workflow command the VEX document supplied", line)
+		}
+	}
+	out := log.String()
+	if !strings.Contains(out, "::warning::25 VEX assessment(s)") || !strings.Contains(out, "CVE-2024-0::add-mask::x, CVE-2024-1,") {
+		t.Errorf("log = %q, want every unmatched assessment counted and the ids stripped of control characters", out)
+	}
+	if !strings.Contains(out, "CVE-2024-19 and 5 more.") || strings.Contains(out, "CVE-2024-20") {
+		t.Errorf("log = %q, want the first 20 ids named and the rest counted", out)
+	}
+}
+
+func TestPublishReportsSkippedResults(t *testing.T) {
+	cfg := withVulnerabilities(testConfig(), "CVE-1")
+	api := &stubAPI{answer: afclient.ImportResult{Producer: "trivy", Import: afclient.ImportSummary{Format: "sarif", SkippedRules: 3, SkippedRuleIDs: []string{"DS002", "DS026\n::error::x"}}}}
+	var log strings.Builder
+	if _, err := Publish(context.Background(), cfg, testArtefactID, api, &log); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if !strings.Contains(log.String(), "Left out 3 result(s)") || !strings.Contains(log.String(), "DS002, DS026::error::x and 1 more") || strings.Contains(log.String(), "\n::error::") {
+		t.Errorf("log = %q, want the skipped results counted and named", log.String())
+	}
+}
+
+func TestPublishSaysNothingOfSkippedResultsWhenThereAreNone(t *testing.T) {
+	cfg := withVulnerabilities(testConfig(), "CVE-1")
+	api := &stubAPI{answer: afclient.ImportResult{Producer: "trivy", Import: afclient.ImportSummary{Format: "trivy"}}}
+	var log strings.Builder
+	if _, err := Publish(context.Background(), cfg, testArtefactID, api, &log); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if strings.Contains(log.String(), "Left out") {
+		t.Errorf("log = %q, want no mention of skipped results", log.String())
+	}
+}
+
+// The converted document comes from a dry run before the import, so a workflow has it to inspect even when the import itself then fails.
+func TestPublishWritesTheConvertedDocumentBeforeImporting(t *testing.T) {
+	cfg := withVulnerabilities(testConfig(), "CVE-1")
+	cfg.ConvertedOutputFile = filepath.Join(t.TempDir(), "converted.json")
+
+	api := &stubAPI{uploadErr: &afclient.StatusError{Status: 500, Snippet: "boom"}}
+	res, err := Publish(context.Background(), cfg, testArtefactID, api, io.Discard)
+	if err == nil {
+		t.Fatal("Publish succeeded despite a failed import")
+	}
+	if api.dryRuns != 1 || api.uploadCalls != 1 {
+		t.Errorf("dry runs = %d, imports = %d, want one of each", api.dryRuns, api.uploadCalls)
+	}
+	if res.ConvertedFile != cfg.ConvertedOutputFile {
+		t.Errorf("converted file output = %q, want %q", res.ConvertedFile, cfg.ConvertedOutputFile)
+	}
+	written, readErr := os.ReadFile(cfg.ConvertedOutputFile)
+	if readErr != nil {
+		t.Fatalf("the converted document was not written: %v", readErr)
+	}
+	// ArtefactFlow's own format, uploadable as it stands: the import summary is not part of it, and a 0.0 score survives.
+	if strings.Contains(string(written), `"import"`) || !strings.Contains(string(written), `"score": 0.0`) || !strings.Contains(string(written), `"producer": "trivy"`) {
+		t.Errorf("converted document = %s", written)
+	}
+}
+
+// A dry run that fails stops before the import: nothing is recorded, and the error says how to retry.
+func TestPublishStopsWhenTheDryRunFails(t *testing.T) {
+	cfg := withVulnerabilities(testConfig(), "CVE-1")
+	cfg.ConvertedOutputFile = filepath.Join(t.TempDir(), "converted.json")
+
+	api := &stubAPI{dryRunErr: &afclient.StatusError{Status: 400, Message: "The report was refused"}}
+	res, err := Publish(context.Background(), cfg, testArtefactID, api, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "The report was refused") {
+		t.Fatalf("error = %v, want the refusal", err)
+	}
+	if api.uploadCalls != 0 || res.ConvertedFile != "" || res.VulnerabilitiesUploaded {
+		t.Errorf("imports = %d, result = %+v, want nothing recorded or written", api.uploadCalls, res)
 	}
 }
 
@@ -187,8 +314,8 @@ func TestPublishUploadFailureSaysTheVersionExists(t *testing.T) {
 	if err == nil {
 		t.Fatal("Publish succeeded despite a failed upload")
 	}
-	// This is the failure that must never be ambiguous: the version exists, and only the upload needs re-running.
-	for _, want := range []string{"was created", "Re-run this step", "Nothing was partially recorded"} {
+	// This is the failure that must never be ambiguous: the version exists, and only the import needs re-running, which a plain re-run would not do: it would fail on the existing version first.
+	for _, want := range []string{"was created", "re-run this step with `if-exists: skip`", "Nothing of the report was recorded"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error = %v, want it to mention %q", err, want)
 		}
@@ -199,17 +326,20 @@ func TestPublishUploadFailureSaysTheVersionExists(t *testing.T) {
 	}
 }
 
-// A report that cannot be read or parsed is knowable before any request is made, so it must fail during configuration, never after a version has been created. Publishing a version and only then discovering the file is malformed leaves the artefact recorded without the vulnerabilities it was meant to carry.
+// A report that is missing, empty or not JSON is knowable before any request is made, so it must fail during configuration, never after a version has been created.
 func TestBadReportFailsBeforeAnythingIsCreated(t *testing.T) {
 	dir := t.TempDir()
-	malformed := filepath.Join(dir, "malformed.json")
-	if err := os.WriteFile(malformed, []byte(`{"vulnerabilities":[{"id":"CVE-1","serverity":"high"}]}`), 0o600); err != nil {
-		t.Fatal(err)
+	write := func(name, content string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
 	}
-
 	for name, path := range map[string]string{
 		"missing file":   filepath.Join(dir, "absent.json"),
-		"malformed file": malformed,
+		"empty file":     write("empty.json", " \n"),
+		"truncated file": write("truncated.json", `{"vulnerabilities":[{"id":"CVE-1"`),
 	} {
 		t.Run(name, func(t *testing.T) {
 			vars := validEnv()
@@ -223,8 +353,8 @@ func TestBadReportFailsBeforeAnythingIsCreated(t *testing.T) {
 	}
 }
 
-// The report reaches Publish already parsed, so nothing it does can re-read the file. This is what makes the ordering guarantee above hold.
-func TestPublishUsesThePreParsedReport(t *testing.T) {
+// The report reaches Publish already read, so nothing it does can re-read the file.
+func TestPublishUsesThePreReadReport(t *testing.T) {
 	cfg := withVulnerabilities(testConfig(), "CVE-1")
 	cfg.VulnerabilitiesFile = filepath.Join(t.TempDir(), "never-read.json")
 
@@ -232,8 +362,8 @@ func TestPublishUsesThePreParsedReport(t *testing.T) {
 	if _, err := Publish(context.Background(), cfg, testArtefactID, api, io.Discard); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
-	if len(api.uploadedSet.Vulnerabilities) != 1 {
-		t.Errorf("uploaded %+v, want the set parsed at configuration time", api.uploadedSet.Vulnerabilities)
+	if !strings.Contains(string(api.imported.Report), "CVE-1") {
+		t.Errorf("imported %q, want the report read at configuration time", api.imported.Report)
 	}
 }
 

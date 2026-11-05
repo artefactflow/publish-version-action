@@ -83,23 +83,29 @@ inputs:
     required: false
 
   upload-vulnerabilities:
-    description: "Upload the version's vulnerabilities after creating it. This replaces the version's complete recorded set, so the file must hold the scanner's entire list. Defaults to false. Environment variable: ARTEFACTFLOW_UPLOAD_VULNERABILITIES."
+    description: "Import a scan report onto the version after creating it. The report replaces the findings its producer recorded on the version before, so it must hold the scanner's entire list; findings of other producers are kept. Defaults to false. Environment variable: ARTEFACTFLOW_UPLOAD_VULNERABILITIES."
     required: false
   vulnerabilities-file:
-    description: 'Path to the vulnerability report to upload. A Trivy JSON, Grype JSON, CycloneDX, or native ArtefactFlow report is accepted; the format is detected automatically. Required when upload-vulnerabilities is true. Environment variable: ARTEFACTFLOW_VULNERABILITIES_FILE.'
+    description: 'Path to the vulnerability report to import, as your scanner wrote it. A Trivy JSON, Grype JSON, CycloneDX, SARIF 2.1.0, OSV-Scanner JSON, Snyk JSON, GitLab dependency or container scanning, or native ArtefactFlow report is accepted; ArtefactFlow detects the format and converts it. At most 32 MiB, together with any VEX file. Required when upload-vulnerabilities is true. Environment variable: ARTEFACTFLOW_VULNERABILITIES_FILE.'
     required: false
   vulnerabilities-format:
-    description: 'Override the report format instead of detecting it: native, trivy, grype, or cyclonedx. Leave unset to detect it from the document. A document that does not match the override is an error, not a silent fallback. Environment variable: ARTEFACTFLOW_VULNERABILITIES_FORMAT.'
+    description: 'Override the report format instead of detecting it: native, trivy, grype, cyclonedx, sarif, osv-scanner, gitlab, or snyk. Leave unset to detect it from the document. A document that does not match the override is an error, not a silent fallback. Environment variable: ARTEFACTFLOW_VULNERABILITIES_FORMAT.'
+    required: false
+  vulnerabilities-producer:
+    description: "Who produced the report, as a lowercase slug such as image-scan. The import replaces only this producer's earlier findings on the version. Defaults to the report's format (trivy, grype, cyclonedx, native, osv-scanner, or snyk), or for a SARIF log or GitLab report, which many tools write, to the tool the report names (such as trivy, grype, or gemnasium), so a tool's SARIF and its own JSON replace each other's findings; set it when one version gets two reports of the same format, such as an image scan and a source scan. Environment variable: ARTEFACTFLOW_VULNERABILITIES_PRODUCER."
+    required: false
+  vulnerabilities-producer-version:
+    description: "The version of the scanner that wrote the report, recorded with its findings, at most 64 characters without control characters. Defaults to the version the report states; set it when the report states none, or the wrong one. Environment variable: ARTEFACTFLOW_VULNERABILITIES_PRODUCER_VERSION."
     required: false
   vex-file:
-    description: 'Path to a CycloneDX VEX document whose assessments are attached to the findings. Supplied alongside a Trivy, Grype or CycloneDX scan report, it is merged into the same upload. A native report carries its analysis inline and takes no VEX file. Environment variable: ARTEFACTFLOW_VEX_FILE.'
+    description: 'Path to a CycloneDX VEX document whose assessments are attached to the findings. Supplied alongside a scanner report, it is sent in the same import. A native report carries its analysis inline and takes no VEX file. Environment variable: ARTEFACTFLOW_VEX_FILE.'
     required: false
   converted-output-file:
-    description: 'Path to write the converted native JSON that will be uploaded, so a workflow can inspect or archive it. Written before the upload runs. Environment variable: ARTEFACTFLOW_CONVERTED_OUTPUT_FILE.'
+    description: 'Path to write the findings the report converts to, in ArtefactFlow native JSON, so a workflow can inspect or archive them. A dry run of the import produces it before the import runs. Use a path inside the workspace. Environment variable: ARTEFACTFLOW_CONVERTED_OUTPUT_FILE.'
     required: false
 
   if-exists:
-    description: 'What to do when the version already exists: fail (default) reports an error, skip treats it as success and leaves the existing version untouched while still uploading vulnerabilities. Environment variable: ARTEFACTFLOW_IF_EXISTS.'
+    description: 'What to do when the version already exists: fail (default) reports an error, skip treats it as success and leaves the existing version untouched while still importing the scan report. Environment variable: ARTEFACTFLOW_IF_EXISTS.'
     required: false
 
 outputs:
@@ -110,9 +116,9 @@ outputs:
   created:
     description: 'true when this run created the version; false when it already existed and if-exists was skip.'
   vulnerabilities-uploaded:
-    description: 'true when a vulnerability set was uploaded in this run.'
+    description: 'true when the scan report was imported in this run.'
   converted-vulnerabilities-file:
-    description: 'Path the converted native JSON was written to, echoing converted-output-file when it was set; empty otherwise.'
+    description: 'Path the converted native JSON was written to, echoing converted-output-file when it was set and written; empty otherwise.'
 
 runs:
   using: 'docker'

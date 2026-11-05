@@ -1,12 +1,16 @@
 package afclient
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
+	"path/filepath"
 )
 
 // ErrVersionExists reports that the version already exists on the artefact. It is separated from other failures because it is the one error a pipeline may legitimately want to treat as success: a re-run of the same build should not have to fail.
@@ -71,18 +75,123 @@ func (c *Client) CreateVersion(ctx context.Context, artefactID string, in Versio
 	return &v, res.header.Get("Location"), nil
 }
 
-// ReplaceVulnerabilities replaces the complete vulnerability set recorded for a version. The endpoint is a full replace, not an append: the payload must be the scanner's entire list, and anything previously recorded and absent from it is removed.
+// maxImportAnswer bounds an import's answer. A dry run answers with every finding the report converted to, up to 5000, each with its description, so it is larger than any other answer this client reads.
+const maxImportAnswer = 64 << 20
+
+// ImportVulnerabilities sends a scanner report to the version's import endpoint, which detects its format, converts it, lays the VEX document over it and records the findings, replacing those of the same producer. Findings other producers recorded on the version are kept.
 //
-// The version is addressed by its SemVer string, not by an id.
-func (c *Client) ReplaceVulnerabilities(ctx context.Context, artefactID, versionValue string, in VulnerabilitiesInput) error {
-	path := "/v1/artefacts/" + url.PathEscape(artefactID) + "/versions/" + url.PathEscape(versionValue) + "/vulnerabilities"
-	// A clean scan must clear the version's findings, so an empty set is sent as `[]` rather than the `null` a nil slice would marshal to. Reaching here with a nil slice means the caller explicitly asked for an empty set; a report that merely failed to mention one is refused before this point.
-	if in.Vulnerabilities == nil {
-		in.Vulnerabilities = []json.RawMessage{}
+// The version is addressed by its SemVer string, not by an id. The files are sent as they were written, as multipart form data: no conversion happens here.
+func (c *Client) ImportVulnerabilities(ctx context.Context, artefactID, versionValue string, in ImportRequest) (*ImportResult, error) {
+	body, contentType, err := importBody(in)
+	if err != nil {
+		return nil, fmt.Errorf("import vulnerabilities for version %s: %w", versionValue, err)
 	}
-	// The endpoint reports success as 200 with the stored set; 201 and 204 are accepted too rather than failing a write that actually landed.
-	if _, err := c.sendJSON(ctx, http.MethodPut, path, in, http.StatusOK, http.StatusCreated, http.StatusNoContent); err != nil {
-		return fmt.Errorf("upload vulnerabilities for version %s: %w", versionValue, err)
+	q := url.Values{}
+	if in.Format != "" {
+		q.Set("format", in.Format)
 	}
-	return nil
+	if in.Producer != "" {
+		q.Set("producer", in.Producer)
+	}
+	if in.ProducerVersion != "" {
+		q.Set("producer_version", in.ProducerVersion)
+	}
+	if in.DryRun {
+		q.Set("dry_run", "true")
+	}
+	u := c.baseURL + "/v1/artefacts/" + url.PathEscape(artefactID) + "/versions/" + url.PathEscape(versionValue) + "/vulnerabilities/import"
+	if len(q) > 0 {
+		u += "?" + q.Encode()
+	}
+
+	res, err := c.do(ctx, request{method: http.MethodPost, url: u, body: body, contentType: contentType, okStatus: []int{http.StatusOK}, maxResponse: maxImportAnswer})
+	if err != nil {
+		return nil, fmt.Errorf("import vulnerabilities for version %s: %w", versionValue, err)
+	}
+	if in.DryRun {
+		return decodePreview(res.body)
+	}
+	// The findings are recorded once the API answers 200, so an answer this client cannot read is not a failure: the import still happened, and only the summary is missing from the log.
+	return decodeRecorded(res.body), nil
+}
+
+// importBody renders the report and the VEX document as the multipart body the import endpoint takes. Each part is declared JSON, which is what the endpoint expects of both.
+func importBody(in ImportRequest) ([]byte, string, error) {
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	parts := []struct {
+		name, file string
+		content    []byte
+	}{{"report", in.ReportName, in.Report}}
+	if in.VEX != nil {
+		parts = append(parts, struct {
+			name, file string
+			content    []byte
+		}{"vex", in.VEXName, in.VEX})
+	}
+	for _, p := range parts {
+		h := textproto.MIMEHeader{}
+		h.Set("Content-Disposition", fmt.Sprintf(`form-data; name=%q; filename=%q`, p.name, filepath.Base(p.file)))
+		h.Set("Content-Type", "application/json")
+		pw, err := w.CreatePart(h)
+		if err != nil {
+			return nil, "", err
+		}
+		if _, err := pw.Write(p.content); err != nil {
+			return nil, "", err
+		}
+	}
+	if err := w.Close(); err != nil {
+		return nil, "", err
+	}
+	return buf.Bytes(), w.FormDataContentType(), nil
+}
+
+// preview is a dry run's answer.
+type preview struct {
+	Producer        string            `json:"producer"`
+	ProducerVersion string            `json:"producer_version"`
+	Vulnerabilities []json.RawMessage `json:"vulnerabilities"`
+	Import          ImportSummary     `json:"import"`
+}
+
+// decodePreview reads a dry run's answer. Unlike a recording import, nothing happened if it cannot be read, and the document is the whole point of asking for one, so an unreadable answer is an error.
+func decodePreview(body []byte) (*ImportResult, error) {
+	var p preview
+	if err := json.Unmarshal(body, &p); err != nil {
+		return nil, fmt.Errorf("read the dry-run answer: %w", err)
+	}
+	return &ImportResult{
+		Producer:        p.Producer,
+		ProducerVersion: p.ProducerVersion,
+		Findings:        len(p.Vulnerabilities),
+		Import:          p.Import,
+		Document:        json.RawMessage(body),
+	}, nil
+}
+
+// recorded is the answer of an import that recorded: the first page of the version's findings, their total, and what the import read. Only the total and the summary are read here.
+type recorded struct {
+	Metadata struct {
+		TotalRecords int `json:"total_records"`
+	} `json:"metadata"`
+	Producer struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	} `json:"producer"`
+	Import ImportSummary `json:"import"`
+}
+
+// decodeRecorded reads what it can of a recording import's answer.
+func decodeRecorded(body []byte) *ImportResult {
+	var r recorded
+	if err := json.Unmarshal(body, &r); err != nil {
+		return &ImportResult{}
+	}
+	return &ImportResult{
+		Producer:        r.Producer.Name,
+		ProducerVersion: r.Producer.Version,
+		VersionFindings: r.Metadata.TotalRecords,
+		Import:          r.Import,
+	}
 }

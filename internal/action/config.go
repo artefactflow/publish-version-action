@@ -1,4 +1,4 @@
-// Package action adapts this action to the GitHub Actions runner: it reads the action inputs from the environment, derives the version's build provenance from the workflow context, loads the vulnerability report, and writes the outputs in the runner's file format.
+// Package action adapts this action to the GitHub Actions runner: it reads the action inputs from the environment, derives the version's build provenance from the workflow context, reads the scan report to import, and writes the outputs in the runner's file format.
 package action
 
 import (
@@ -13,7 +13,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/artefactflow/publish-version-action/internal/afclient"
-	"github.com/artefactflow/publish-version-action/internal/convert"
 )
 
 // DefaultAPIURL is the hosted ArtefactFlow API, used when neither the `api-url` input nor ARTEFACTFLOW_API_URL is set. Self-hosted operators override it; nothing else in the action assumes a particular instance.
@@ -50,21 +49,15 @@ type Config struct {
 
 	// UploadVulnerabilities reports whether the second call runs.
 	UploadVulnerabilities bool
-	// VulnerabilitiesFile is the report that was loaded, kept for log and error messages.
+	// VulnerabilitiesFile is the report's path, kept for log and error messages.
 	VulnerabilitiesFile string
-	// VulnerabilitiesFormat is the format override, empty for auto-detection. Kept for the log line.
-	VulnerabilitiesFormat convert.Format
-	// Vulnerabilities is the wire body: the report loaded (native) or converted (Trivy, Grype, CycloneDX) and, when a VEX file was supplied, overlaid with its assessments. It is prepared here rather than after the version is created: discovering a malformed report only once the version exists would leave the artefact half-published for a mistake that was knowable before any request was made.
-	Vulnerabilities afclient.VulnerabilitiesInput
-	// ConversionNotes are step-log lines a conversion produced, such as a truncated description or a scan that clears the recorded set.
-	ConversionNotes []string
-	// UnmatchedVEX names the VEX assessments that matched no converted finding, surfaced as a warning: it usually means the scan and the VEX are from different builds.
-	UnmatchedVEX []string
+	// Import is the report to import, read here rather than after the version is created, so a missing, empty, unparseable or oversized file fails before anything is published. Converting it is ArtefactFlow's job: the files travel as they were written.
+	Import afclient.ImportRequest
 
-	// VEXFile is the CycloneDX VEX document supplied alongside a scan report, overlaid into the upload.
+	// VEXFile is the CycloneDX VEX document supplied alongside a scan report, laid over its findings by the import.
 	VEXFile string
 
-	// ConvertedOutputFile, when set, receives the native JSON that will be uploaded, so a workflow can inspect or archive it before it goes.
+	// ConvertedOutputFile, when set, receives the ArtefactFlow-format document the report converts to, so a workflow can inspect or archive what was recorded.
 	ConvertedOutputFile string
 }
 
@@ -79,6 +72,8 @@ var (
 	semverRE = regexp.MustCompile(`^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$`)
 	// propertyNameRE mirrors the character set the API accepts for a property name.
 	propertyNameRE = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+	// producerRE is the API's producer name: a lowercase slug of at most 64 characters.
+	producerRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 )
 
 // EnvVar returns the environment variable that backs an input: `artefact-name` is backed by ARTEFACTFLOW_ARTEFACT_NAME. Keeping the mapping mechanical means a new input gets its variable for free.
@@ -253,20 +248,61 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	cfg.VEXFile = input("vex-file")
 	cfg.ConvertedOutputFile = input("converted-output-file")
 
-	formatOverride := strings.ToLower(input("vulnerabilities-format"))
+	format := strings.ToLower(input("vulnerabilities-format"))
+	if format != "" && !slices.Contains(afclient.ReportFormats, format) {
+		fail("input `vulnerabilities-format` must be one of %s, or unset to detect the format, got %q", strings.Join(afclient.ReportFormats, ", "), truncate(format, 32))
+	}
+	producer := input("vulnerabilities-producer")
+	if producer != "" && !producerRE.MatchString(producer) {
+		fail("input `vulnerabilities-producer` must be 1 to 64 lowercase letters, digits, `.`, `_` and `-`, starting with a letter or digit, got %q", truncate(producer, 70))
+	}
+	// The API takes any text here except control characters, which would otherwise break the line the version is shown on. The length is counted in characters, as the API counts it.
+	producerVersion := input("vulnerabilities-producer-version")
+	switch {
+	case utf8.RuneCountInString(producerVersion) > 64:
+		fail("input `vulnerabilities-producer-version` must be at most 64 characters, got %d", utf8.RuneCountInString(producerVersion))
+	case strings.ContainsFunc(producerVersion, isASCIIControl):
+		fail("input `vulnerabilities-producer-version` must not contain control characters such as a line break, got %q", truncate(producerVersion, 70))
+	}
 
-	// Everything the upload needs is read and validated here, before the version is created. A report that cannot be converted, or a VEX document with an unmappable value, has to fail before anything is published: a version created and then found to be un-uploadable is the half-published state the whole ordering exists to prevent.
+	// What can be checked without ArtefactFlow is checked here, before the version is created: that the files exist, are not empty, are JSON, and fit in one request. Whether the report converts is for ArtefactFlow to say, and it can only say so once the version exists, since the import addresses it.
 	switch {
 	case cfg.UploadVulnerabilities:
 		if cfg.VulnerabilitiesFile == "" {
 			fail("input `vulnerabilities-file` is required when `upload-vulnerabilities` is true")
-		} else if prepared, err := LoadAndConvert(cfg.VulnerabilitiesFile, formatOverride, cfg.VEXFile); err != nil {
-			fail("%s", err)
-		} else {
-			cfg.Vulnerabilities = prepared.Body
-			cfg.VulnerabilitiesFormat = prepared.Format
-			cfg.ConversionNotes = prepared.Notes
-			cfg.UnmatchedVEX = prepared.UnmatchedVEX
+			break
+		}
+		cfg.Import = afclient.ImportRequest{ReportName: cfg.VulnerabilitiesFile, VEXName: cfg.VEXFile, Format: format, Producer: producer, ProducerVersion: producerVersion}
+		// The sizes are checked from the file system before either file is read, so an oversized report (an old image can produce 80 MB) fails without the action first holding all of it in memory. A file that cannot be stat'ed is reported as unreadable here and not read at all.
+		reportSize, reportErr := fileSize("vulnerabilities file", cfg.VulnerabilitiesFile)
+		if reportErr != nil {
+			fail("%s", reportErr)
+		}
+		var vexSize int64
+		var vexErr error
+		if cfg.VEXFile != "" {
+			if vexSize, vexErr = fileSize("vex file", cfg.VEXFile); vexErr != nil {
+				fail("%s", vexErr)
+			}
+		}
+		if size := reportSize + vexSize; size > importFilesLimit {
+			fail("%s", tooLargeToImport(size))
+			break
+		}
+		var err error
+		if reportErr == nil {
+			if cfg.Import.Report, err = readJSONFile("vulnerabilities file", cfg.VulnerabilitiesFile); err != nil {
+				fail("%s", err)
+			}
+		}
+		if cfg.VEXFile != "" && vexErr == nil {
+			if cfg.Import.VEX, err = readJSONFile("vex file", cfg.VEXFile); err != nil {
+				fail("%s", err)
+			}
+		}
+		// Checked again on what was read: a file still being written when it was stat'ed may have grown since.
+		if size := int64(len(cfg.Import.Report) + len(cfg.Import.VEX)); size > importFilesLimit {
+			fail("%s", tooLargeToImport(size))
 		}
 
 	case cfg.VEXFile != "":
@@ -278,6 +314,19 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		return Config{}, fmt.Errorf("invalid action inputs: %s", strings.Join(problems, "; "))
 	}
 	return cfg, nil
+}
+
+// isASCIIControl matches exactly what the API's producer_version pattern `^[^\x00-\x1f\x7f]*$` refuses, so the action rejects no value ArtefactFlow would accept.
+func isASCIIControl(r rune) bool {
+	return r < 0x20 || r == 0x7f
+}
+
+// importFilesLimit is the most the report and VEX file may hold together. The limit covers the whole request; the multipart framing around the files is a few hundred bytes, so the margin keeps a report just under the limit from being refused only after the version exists.
+const importFilesLimit = afclient.MaxImportBytes - 64<<10
+
+// tooLargeToImport is the message for files that would not fit in one import, written for the workflow author who has to make the scan smaller.
+func tooLargeToImport(size int64) string {
+	return fmt.Sprintf("the vulnerabilities file and vex file are %.1f MiB together; ArtefactFlow accepts at most %d MiB in one import. Scan with fewer findings, such as only those with a fix", float64(size)/(1<<20), afclient.MaxImportBytes>>20)
 }
 
 // validateCredentials checks that a complete pair of service-account credentials was supplied.

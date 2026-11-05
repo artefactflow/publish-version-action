@@ -1,4 +1,4 @@
-// Package afclient is a small typed client for the ArtefactFlow API, scoped to the endpoints this action needs: resolving an artefact name to its id, creating a version, and replacing a version's recorded vulnerabilities.
+// Package afclient is a small typed client for the ArtefactFlow API, scoped to the endpoints this action needs: resolving an artefact name to its id, creating a version, and importing a scanner report onto that version.
 //
 // Authentication is centralised in a single bearer-token RoundTripper, so the token is applied in exactly one place and never reaches an error string or a log line. The base URL is always supplied by the caller (never hard-coded) per the ArtefactFlow integration rules.
 package afclient
@@ -31,17 +31,19 @@ type Client struct {
 type retryPolicy struct {
 	maxAttempts int           // total tries including the first; <1 is clamped to 1
 	baseDelay   time.Duration // backoff before the 2nd attempt; doubles each round
-	maxDelay    time.Duration // ceiling on any single backoff sleep
+	maxDelay    time.Duration // ceiling on any single backoff sleep the client chooses itself
+	// maxRetryAfter caps a wait the server asks for with Retry-After. It is separate from maxDelay because the two answer different questions: maxDelay keeps the client's own guesswork short, while a Retry-After is the server saying when it expects to have room (ArtefactFlow's import gate asks for 10 s), and cutting that short only spends an attempt on a request it already said it would refuse.
+	maxRetryAfter time.Duration
 }
 
 func defaultRetry() retryPolicy {
-	return retryPolicy{maxAttempts: 3, baseDelay: 200 * time.Millisecond, maxDelay: 5 * time.Second}
+	return retryPolicy{maxAttempts: 3, baseDelay: 200 * time.Millisecond, maxDelay: 5 * time.Second, maxRetryAfter: 30 * time.Second}
 }
 
-// delay computes the backoff before the retry following attempt index (0-based: 0 is the wait before the 2nd attempt). A server-supplied Retry-After wins, capped at maxDelay so one slow API cannot stall a whole job. Otherwise it is exponential with full jitter in [d/2, d], so a fleet of concurrent workflow runs does not synchronise its retry storm against a recovering API.
+// delay computes the backoff before the retry following attempt index (0-based: 0 is the wait before the 2nd attempt). A server-supplied Retry-After wins and is honoured up to maxRetryAfter, which is the server's own estimate of when a retry can succeed; the cap only stops a misbehaving API from stalling a whole job. Otherwise it is exponential with full jitter in [d/2, d], capped at maxDelay, so a fleet of concurrent workflow runs does not synchronise its retry storm against a recovering API.
 func (p retryPolicy) delay(attempt int, retryAfter time.Duration) time.Duration {
 	if retryAfter > 0 {
-		return min(retryAfter, p.maxDelay)
+		return min(retryAfter, p.maxRetryAfter)
 	}
 	if p.baseDelay <= 0 {
 		return 0
@@ -68,13 +70,13 @@ func WithHTTPClient(h *http.Client) Option {
 	return func(c *Client) { c.http = h }
 }
 
-// WithRetry overrides the bounded-retry policy for transient upstream failures. maxAttempts is the total number of tries including the first; a value below 1 is clamped to 1, which disables retries. baseDelay is the backoff before the second attempt and doubles each round up to maxDelay.
+// WithRetry overrides the bounded-retry policy for transient upstream failures. maxAttempts is the total number of tries including the first; a value below 1 is clamped to 1, which disables retries. baseDelay is the backoff before the second attempt and doubles each round up to maxDelay. maxDelay also caps a server-supplied Retry-After, so a policy set here never waits longer than the caller allowed, which is what keeps tests against a server answering `Retry-After: 10` fast.
 func WithRetry(maxAttempts int, baseDelay, maxDelay time.Duration) Option {
 	return func(c *Client) {
 		if maxAttempts < 1 {
 			maxAttempts = 1
 		}
-		c.retry = retryPolicy{maxAttempts: maxAttempts, baseDelay: baseDelay, maxDelay: maxDelay}
+		c.retry = retryPolicy{maxAttempts: maxAttempts, baseDelay: baseDelay, maxDelay: maxDelay, maxRetryAfter: maxDelay}
 	}
 }
 
@@ -132,13 +134,27 @@ type result struct {
 	header http.Header
 }
 
+// request is one API call. The body is held as bytes rather than a reader so each attempt can build a fresh request.
+type request struct {
+	method      string
+	url         string
+	body        []byte
+	contentType string
+	okStatus    []int
+	// maxResponse bounds how much of an accepted response is read; zero means defaultMaxResponse.
+	maxResponse int64
+}
+
+// defaultMaxResponse bounds a response body. The bodies here are a version document or an error; a few megabytes is already far more than any legitimate one. The import's answer is the exception and sets its own bound.
+const defaultMaxResponse = 8 << 20
+
 // getJSON performs a GET against path (relative to the base URL) and decodes a 200 body into dst. Non-200 responses become errors that name the status and whatever the API said, never the token.
 func (c *Client) getJSON(ctx context.Context, path string, query url.Values, dst any) error {
 	u := c.baseURL + path
 	if len(query) > 0 {
 		u += "?" + query.Encode()
 	}
-	res, err := c.do(ctx, http.MethodGet, u, nil, http.StatusOK)
+	res, err := c.do(ctx, request{method: http.MethodGet, url: u, okStatus: []int{http.StatusOK}})
 	if err != nil {
 		return err
 	}
@@ -154,12 +170,12 @@ func (c *Client) sendJSON(ctx context.Context, method, path string, payload any,
 	if err != nil {
 		return nil, fmt.Errorf("encode %s %s body: %w", method, path, err)
 	}
-	return c.do(ctx, method, c.baseURL+path, body, okStatus...)
+	return c.do(ctx, request{method: method, url: c.baseURL + path, body: body, contentType: "application/json", okStatus: okStatus})
 }
 
 // doRaw performs a request and returns the raw body of an accepted response. It is the entry point for the token exchange, which needs no response headers.
 func (c *Client) doRaw(ctx context.Context, method, fullURL string, reqBody []byte) ([]byte, error) {
-	res, err := c.do(ctx, method, fullURL, reqBody, http.StatusOK)
+	res, err := c.do(ctx, request{method: method, url: fullURL, body: reqBody, contentType: "application/json", okStatus: []int{http.StatusOK}})
 	if err != nil {
 		return nil, err
 	}
@@ -168,8 +184,8 @@ func (c *Client) doRaw(ctx context.Context, method, fullURL string, reqBody []by
 
 // do performs a request, mapping any status outside okStatus to a descriptive error. Transient failures (connection errors, HTTP 429, and 5xx) are retried with exponential backoff and jitter, bounded by the client's retry policy; permanent failures (4xx other than 429) return immediately.
 //
-// reqBody is held as bytes rather than a reader so each attempt can build a fresh request. Every call that reaches here is safe to replay: the GETs are idempotent, replaying the token exchange only mints another short-lived token, the vulnerability upload is a full replace, and a create whose response was lost surfaces on replay as a 409 that the caller already knows how to interpret.
-func (c *Client) do(ctx context.Context, method, fullURL string, reqBody []byte, okStatus ...int) (*result, error) {
+// Every call that reaches here is safe to replay: the GETs are idempotent, replaying the token exchange only mints another short-lived token, an import replaces the producer's findings with the same report again, and a create whose response was lost surfaces on replay as a 409 that the caller already knows how to interpret.
+func (c *Client) do(ctx context.Context, r request) (*result, error) {
 	var (
 		lastErr        error
 		lastRetryAfter time.Duration
@@ -180,7 +196,7 @@ func (c *Client) do(ctx context.Context, method, fullURL string, reqBody []byte,
 				return nil, err
 			}
 		}
-		res, retryable, retryAfter, err := c.doOnce(ctx, method, fullURL, reqBody, okStatus)
+		res, retryable, retryAfter, err := c.doOnce(ctx, r)
 		if err == nil {
 			return res, nil
 		}
@@ -198,19 +214,19 @@ func (c *Client) do(ctx context.Context, method, fullURL string, reqBody []byte,
 }
 
 // doOnce performs a single attempt. It reports whether the failure is worth retrying and any server-requested Retry-After delay.
-func (c *Client) doOnce(ctx context.Context, method, fullURL string, reqBody []byte, okStatus []int) (res *result, retryable bool, retryAfter time.Duration, err error) {
+func (c *Client) doOnce(ctx context.Context, r request) (res *result, retryable bool, retryAfter time.Duration, err error) {
 	var payload io.Reader
-	if reqBody != nil {
-		payload = bytes.NewReader(reqBody)
+	if r.body != nil {
+		payload = bytes.NewReader(r.body)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, fullURL, payload)
+	req, err := http.NewRequestWithContext(ctx, r.method, r.url, payload)
 	if err != nil {
 		return nil, false, 0, err
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", UserAgent)
-	if reqBody != nil {
-		req.Header.Set("Content-Type", "application/json")
+	if r.body != nil {
+		req.Header.Set("Content-Type", r.contentType)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -222,9 +238,12 @@ func (c *Client) doOnce(ctx context.Context, method, fullURL string, reqBody []b
 		return nil, true, 0, err
 	}
 	defer resp.Body.Close()
-	// The bodies here are a version document or a stored vulnerability list; a few megabytes is already far more than any legitimate response.
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
-	for _, ok := range okStatus {
+	limit := r.maxResponse
+	if limit <= 0 {
+		limit = defaultMaxResponse
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, limit))
+	for _, ok := range r.okStatus {
 		if resp.StatusCode == ok {
 			return &result{status: resp.StatusCode, body: body, header: resp.Header}, false, 0, nil
 		}
@@ -269,10 +288,11 @@ func waitBackoff(ctx context.Context, d time.Duration) error {
 // StatusError is an unexpected response from the ArtefactFlow API.
 type StatusError struct {
 	Status int
-	// Code, Message, and LogID are the API's own error envelope, when the body carried one. LogID is what support needs to find the request in the API's logs, so it is always surfaced.
+	// Code, Message, LogID and Details are the API's own error envelope, when the body carried one. LogID is what support needs to find the request in the API's logs, so it is always surfaced. Details say which field was refused and why: for an imported report, which finding and which of its fields.
 	Code    string
 	Message string
 	LogID   string
+	Details []ErrorDetail
 	// Snippet is a bounded excerpt of the raw body, used when the response was not the documented error envelope: an HTML error page from a proxy, say.
 	Snippet string
 	// AfterRetry records that this response arrived on a retry rather than on the first attempt. It matters for exactly one case: a create that reports a conflict only after an earlier attempt failed transiently is far more likely to be the earlier attempt's own write landing than a genuine duplicate.
@@ -286,19 +306,29 @@ const (
 	codeServiceAccountExpired  = "SERVICEACCOUNT01456"
 )
 
-// apiError is the API's error envelope. The log id field is `logid` on the wire.
-type apiError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
-	LogID   string `json:"logid"`
+// ErrorDetail is one refused field in the API's error envelope.
+type ErrorDetail struct {
+	Field string `json:"field"`
+	Issue string `json:"issue"`
 }
+
+// apiError is the API's error envelope.
+type apiError struct {
+	Code    string        `json:"code"`
+	Message string        `json:"message"`
+	LogID   string        `json:"log_id"`
+	Details []ErrorDetail `json:"details"`
+}
+
+// maxDetails bounds how many refused fields an error quotes. A report refused for one systematic reason can produce hundreds of identical details, and the first few say what to fix.
+const maxDetails = 5
 
 // newStatusError builds a StatusError, preferring the API's structured error body over a raw excerpt. A body that is not the documented envelope (a proxy's HTML error page, for instance) falls back to the excerpt.
 func newStatusError(status int, body []byte) *StatusError {
 	e := &StatusError{Status: status}
 	var parsed apiError
-	if err := json.Unmarshal(body, &parsed); err == nil && parsed.Code != "" {
-		e.Code, e.Message, e.LogID = parsed.Code, parsed.Message, parsed.LogID
+	if err := json.Unmarshal(body, &parsed); err == nil && (parsed.Code != "" || parsed.Message != "") {
+		e.Code, e.Message, e.LogID, e.Details = parsed.Code, parsed.Message, parsed.LogID, parsed.Details
 		return e
 	}
 	e.Snippet = snippet(body)
@@ -307,9 +337,19 @@ func newStatusError(status int, body []byte) *StatusError {
 
 // detail renders whatever the API said about the failure, in one line.
 func (e *StatusError) detail() string {
-	parts := make([]string, 0, 3)
+	parts := make([]string, 0, 4)
 	if e.Message != "" {
 		parts = append(parts, e.Message)
+	}
+	if len(e.Details) > 0 {
+		issues := make([]string, 0, min(len(e.Details), maxDetails)+1)
+		for _, d := range e.Details[:min(len(e.Details), maxDetails)] {
+			issues = append(issues, d.Field+": "+d.Issue)
+		}
+		if more := len(e.Details) - maxDetails; more > 0 {
+			issues = append(issues, fmt.Sprintf("and %d more", more))
+		}
+		parts = append(parts, strings.Join(issues, "; "))
 	}
 	if e.Code != "" {
 		parts = append(parts, "code "+e.Code)
@@ -346,6 +386,12 @@ func (e *StatusError) Error() string {
 		return fmt.Sprintf("HTTP 404: not found on this instance (%s)", e.detail())
 	case http.StatusConflict:
 		return fmt.Sprintf("HTTP 409: that version already exists on this artefact (%s)", e.detail())
+	case http.StatusRequestEntityTooLarge:
+		// ArtefactFlow answers 413 for two limits, and says which in its envelope: the request over 32 MiB, or a report under it that converts to more findings than one upload records (4 MiB of them). A proxy in front of it answers 413 with an HTML page and no envelope, which can only be the request size, so that limit is stated here rather than left to the body.
+		if e.Code != "" || len(e.Details) > 0 {
+			return fmt.Sprintf("HTTP 413: ArtefactFlow refused the import as too large; scan with fewer findings, such as only those with a fix (%s)", e.detail())
+		}
+		return fmt.Sprintf("HTTP 413: the request is larger than the API accepts. A scan report and its VEX document may be at most %d MiB together; scan with fewer findings, such as only those with a fix (%s)", MaxImportBytes>>20, e.detail())
 	default:
 		return fmt.Sprintf("artefactflow api returned HTTP %d (%s)", e.Status, e.detail())
 	}

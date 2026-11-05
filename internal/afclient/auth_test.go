@@ -102,7 +102,7 @@ func TestAuthenticateErrorsAreActionable(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusUnauthorized)
-				w.Write([]byte(`{"code":"` + tc.code + `","message":"Invalid credentials","logid":"abc123"}`))
+				w.Write([]byte(`{"code":"` + tc.code + `","message":"Invalid credentials","log_id":"abc123"}`))
 			}))
 			defer srv.Close()
 

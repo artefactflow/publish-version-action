@@ -2,11 +2,9 @@ package afclient
 
 import "encoding/json"
 
-// The types here mirror the ArtefactFlow API schema. Two of them are load-bearing beyond ordinary marshalling:
+// The types here mirror the ArtefactFlow API schema. One rule is load-bearing beyond ordinary marshalling:
 //
 // Every optional field on a request body is a pointer or an omitempty scalar so that an unset field is omitted entirely rather than sent as a zero value: the API distinguishes "not provided" from "explicitly empty", and sending `"branch": ""` would overwrite a meaningful value.
-//
-// Vulnerability and everything it contains must model the API's schema *completely*. The report a workflow supplies is decoded with unknown fields rejected, so a field the API accepts but this file omits would turn a perfectly valid scanner report into a hard failure.
 
 // VersionInput is the request body for creating a version. It models every field the endpoint accepts, so nothing a workflow might want to record is unreachable through this action.
 type VersionInput struct {
@@ -52,9 +50,6 @@ var Lifecycles = []string{"pre-alpha", "alpha", "beta", "release", "end-of-life"
 // BuildStates are the values the API accepts for a version's build state.
 var BuildStates = []string{"pending", "building", "success", "failed", "cancelled"}
 
-// MaxVulnerabilities is the largest set the vulnerability endpoint accepts in one call.
-const MaxVulnerabilities = 5000
-
 // Reference is a typed link recorded against the version, such as the CI run that produced it.
 type Reference struct {
 	Type    string `json:"type"`
@@ -85,95 +80,50 @@ type Version struct {
 	Version    string `json:"version"`
 }
 
-// VulnerabilitiesInput is the request body for the vulnerability upload. The endpoint is a full replace: whatever is sent becomes the complete recorded set for the version.
-//
-// The findings are carried as the raw JSON they were read from rather than as parsed structs. They are validated against Vulnerability before they get here, but re-encoding them from it would drop every value Go treats as empty (a CVSS score of 0.0 among them), and on a full-replace endpoint a dropped value is a deleted one.
-type VulnerabilitiesInput struct {
-	Vulnerabilities []json.RawMessage `json:"vulnerabilities"`
+// ReportFormats are the report formats the import endpoint reads, in the spelling its `format` parameter takes. The format is detected from the document; naming one only forces it, and a document that does not match is refused.
+var ReportFormats = []string{"native", "trivy", "grype", "cyclonedx", "sarif", "osv-scanner", "gitlab", "snyk"}
+
+// MaxImportBytes is the largest request the import endpoint accepts, the report and any VEX document together. The action checks the files against it before anything is published, so an oversized report fails before the version is created rather than after.
+const MaxImportBytes = 32 << 20
+
+// ImportRequest is one scanner report to record on a version, with an optional CycloneDX VEX document laid over it. The files travel as they were written: ArtefactFlow detects the format and converts the report itself.
+type ImportRequest struct {
+	// Report is the report's content and ReportName its file name, sent as the part's filename so a refusal can name it.
+	Report     []byte
+	ReportName string
+	// VEX and VEXName are the optional VEX document, nil when none was supplied.
+	VEX     []byte
+	VEXName string
+	// Format forces the report format; empty means detect it.
+	Format string
+	// Producer names whose findings the report replaces; empty means the report's format, or for a SARIF log or GitLab report the tool the report names.
+	Producer string
+	// ProducerVersion records the scanner's version with the findings; empty means the version the report states, if it states one. It is for a report that names no version, or names the wrong one.
+	ProducerVersion string
+	// DryRun converts and validates without recording anything, and answers the document that would have been recorded.
+	DryRun bool
 }
 
-// Vulnerability is one finding from a scanner, optionally carrying its VEX assessment. `id` and `source` are the two fields the API requires.
-type Vulnerability struct {
-	ID             string    `json:"id"`
-	Source         *Source   `json:"source,omitempty"`
-	Ratings        []Rating  `json:"ratings,omitempty"`
-	CWEs           []int     `json:"cwes,omitempty"`
-	Description    string    `json:"description,omitempty"`
-	Recommendation string    `json:"recommendation,omitempty"`
-	Analysis       *Analysis `json:"analysis,omitempty"`
-	Affects        []Affects `json:"affects,omitempty"`
-	Published      string    `json:"published,omitempty"`
-	Updated        string    `json:"updated,omitempty"`
+// ImportSummary is what the import read, how the VEX document applied, and which results it left out because they name no vulnerability.
+type ImportSummary struct {
+	Format       string   `json:"format"`
+	VEXMatched   int      `json:"vex_matched"`
+	VEXUnmatched []string `json:"vex_unmatched,omitempty"`
+	// SkippedRules counts the report's results that name no vulnerability (a misconfiguration rule in a SARIF log, an entry without an advisory identifier), which the import leaves out; SkippedRuleIDs lists the first 100 of them.
+	SkippedRules   int      `json:"skipped_rules,omitempty"`
+	SkippedRuleIDs []string `json:"skipped_rule_ids,omitempty"`
 }
 
-// Source identifies the advisory database a finding came from. The API requires a name.
-type Source struct {
-	Name string `json:"name"`
-	URL  string `json:"url,omitempty"`
-}
-
-// Rating is one severity score for a finding.
-//
-// Score is a pointer for the same reason Size and IsDefault are: a scanner can legitimately score a finding 0.0 (an informational one), and on this full-replace endpoint a score dropped by omitempty is a score deleted. The native path forwards findings as raw bytes and never marshals this struct, but the scanner converters build it and encode it, so the distinction is load-bearing there.
-type Rating struct {
-	Score    *float64 `json:"score,omitempty"`
-	Severity string   `json:"severity,omitempty"`
-	Method   string   `json:"method,omitempty"`
-	Vector   string   `json:"vector,omitempty"`
-}
-
-// Severities are the values the API accepts for a rating's severity. An unrecognised scanner severity maps to "unknown", never to a guess.
-var Severities = []string{"critical", "high", "medium", "low", "info", "none", "unknown"}
-
-// RatingMethods are the scoring methods the API accepts. A CVSS vector's version prefix (`CVSS:3.1/…`) is what a converter derives these from: a bare score does not carry its own version.
-var RatingMethods = []string{"CVSSv2", "CVSSv3", "CVSSv31", "CVSSv4", "OWASP"}
-
-// AffectedStatuses are the values the API accepts for an affected component's status.
-var AffectedStatuses = []string{"affected", "unaffected", "unknown"}
-
-// AnalysisStates are the VEX states the API accepts. Note there is no `resolved_with_pedigree`; a CycloneDX VEX carrying it folds to `resolved`.
-var AnalysisStates = []string{"exploitable", "in_triage", "resolved", "false_positive", "not_affected"}
-
-// AnalysisJustifications are the VEX justifications the API accepts. CycloneDX also defines `protected_at_runtime` and `protected_at_perimeter`, which are not in this set: a VEX document carrying one is an error naming the finding, not a silent drop.
-var AnalysisJustifications = []string{
-	"code_not_present", "code_not_reachable", "requires_configuration",
-	"requires_dependency", "requires_environment", "protected_by_compiler",
-	"protected_by_mitigating_control",
-}
-
-// AnalysisResponses are the VEX response actions the API accepts.
-var AnalysisResponses = []string{"can_not_fix", "will_not_fix", "update", "rollback", "workaround_available"}
-
-// The API's length limits on the free-text fields of a finding. A converter truncates to these rather than failing a whole report over an oversized description, and notes the truncation in the step log.
-const (
-	MaxDescriptionLen    = 16384
-	MaxRecommendationLen = 2000
-	MaxAnalysisDetailLen = 4000
-	MaxSourceNameLen     = 256
-	MaxSourceURLLen      = 512
-	MaxAffectsRefLen     = 256
-	MaxRatingVectorLen   = 256
-	MaxAffectedVersion   = 128
-	MaxAffectedRange     = 256
-)
-
-// Affects records which components a finding applies to.
-type Affects struct {
-	Ref      string            `json:"ref,omitempty"`
-	Versions []AffectedVersion `json:"versions,omitempty"`
-}
-
-// AffectedVersion is one affected version or version range.
-type AffectedVersion struct {
-	Version string `json:"version,omitempty"`
-	Range   string `json:"range,omitempty"`
-	Status  string `json:"status,omitempty"`
-}
-
-// Analysis is the VEX assessment attached to a finding, as it travels inside a Vulnerability on the full-replace upload.
-type Analysis struct {
-	State         string   `json:"state,omitempty"`
-	Justification string   `json:"justification,omitempty"`
-	Response      []string `json:"response,omitempty"`
-	Detail        string   `json:"detail,omitempty"`
+// ImportResult is the part of an import's answer the action reports.
+type ImportResult struct {
+	// Producer is the producer whose findings the report replaced, and ProducerVersion the scanner version it recorded, when the report stated one.
+	Producer        string
+	ProducerVersion string
+	// Findings is how many findings the report converted to. Known only on a dry run, whose answer lists them all; an import that records answers with the version's first page.
+	Findings int
+	// VersionFindings is how many findings the version holds after the import, from every producer. Zero on a dry run, which records nothing.
+	VersionFindings int
+	Import          ImportSummary
+	// Document is a dry run's answer exactly as the API sent it: the findings in ArtefactFlow's own format, which is also a valid body for the vulnerability replace endpoint. Nil for an import that recorded.
+	Document json.RawMessage
 }

@@ -55,10 +55,12 @@ That records `1.4.2` with the commit, branch, run id and run number of the workf
 | `size` | no | none | `ARTEFACTFLOW_SIZE` | Size of the artefact in bytes |
 | `download-url` | no | none | `ARTEFACTFLOW_DOWNLOAD_URL` | Direct download URL for the artefact |
 | `upload-vulnerabilities` | no | `false` | `ARTEFACTFLOW_UPLOAD_VULNERABILITIES` | Upload vulnerabilities after creating the version |
-| `vulnerabilities-file` | when uploading | none | `ARTEFACTFLOW_VULNERABILITIES_FILE` | Path to the report: Trivy, Grype, CycloneDX, or native (detected automatically) |
-| `vulnerabilities-format` | no | detected | `ARTEFACTFLOW_VULNERABILITIES_FORMAT` | Force the format: `native`, `trivy`, `grype`, or `cyclonedx` |
+| `vulnerabilities-file` | when uploading | none | `ARTEFACTFLOW_VULNERABILITIES_FILE` | Path to the report as your scanner wrote it: Trivy, Grype, CycloneDX, SARIF, OSV-Scanner, GitLab, Snyk, or native (detected automatically) |
+| `vulnerabilities-format` | no | detected | `ARTEFACTFLOW_VULNERABILITIES_FORMAT` | Force the format: `native`, `trivy`, `grype`, `cyclonedx`, `sarif`, `osv-scanner`, `gitlab`, or `snyk` |
+| `vulnerabilities-producer` | no | the report's format, or for SARIF and GitLab the tool the report names | `ARTEFACTFLOW_VULNERABILITIES_PRODUCER` | Who produced the report, a lowercase slug such as `image-scan`. The import replaces only this producer's findings |
+| `vulnerabilities-producer-version` | no | the version the report states | `ARTEFACTFLOW_VULNERABILITIES_PRODUCER_VERSION` | The scanner's version, recorded with its findings, at most 64 characters without control characters. Set it when the report states none |
 | `vex-file` | no | none | `ARTEFACTFLOW_VEX_FILE` | Path to a CycloneDX VEX document to attach to the findings |
-| `converted-output-file` | no | none | `ARTEFACTFLOW_CONVERTED_OUTPUT_FILE` | Write the converted native JSON here before uploading it |
+| `converted-output-file` | no | none | `ARTEFACTFLOW_CONVERTED_OUTPUT_FILE` | Write the findings the report converts to here, as native JSON, before importing it |
 | `if-exists` | no | `fail` | `ARTEFACTFLOW_IF_EXISTS` | `fail` or `skip` when the version already exists |
 
 Booleans take `true` or `false`. Anything else is an error rather than a silent `false`, so a typo in `upload-vulnerabilities` cannot quietly skip the upload.
@@ -155,14 +157,14 @@ jobs:
 | `version` | The SemVer version that was published |
 | `version-url` | API URL of the version |
 | `created` | `true` when this run created the version; `false` when it already existed and `if-exists` was `skip` |
-| `vulnerabilities-uploaded` | `true` when a vulnerability set was uploaded in this run |
+| `vulnerabilities-uploaded` | `true` when the scan report was imported in this run |
 | `converted-vulnerabilities-file` | Path the converted native JSON was written to, when `converted-output-file` was set |
 
-Outputs are written even when the step fails. If the version is created and the vulnerability upload then fails, `created` is still `true`: the rest of your workflow should not have to guess what state the artefact is in.
+Outputs are written even when the step fails. If the version is created and the import then fails, `created` is still `true`: the rest of your workflow should not have to guess what state the artefact is in.
 
 ## Uploading vulnerabilities
 
-Point the action at a report and it uploads the findings straight after creating the version:
+Point the action at a report and it imports the findings straight after creating the version:
 
 ```yaml
 - uses: artefactflow/publish-version-action@v1
@@ -175,13 +177,19 @@ Point the action at a report and it uploads the findings straight after creating
     vulnerabilities-file: trivy.json
 ```
 
-The report can be your scanner's own output (a **Trivy** JSON report, a **Grype** JSON report, or a **CycloneDX** document) or ArtefactFlow's [native format](examples/vulnerabilities.json). You do not convert it yourself: hand the action the file your scanner already writes and it converts and uploads in the same step. The example above passes Trivy JSON directly.
+The report can be your scanner's own output (a **Trivy** JSON report, a **Grype** JSON report, a **CycloneDX** document, a **SARIF** 2.1.0 log, an **OSV-Scanner** JSON report, a **GitLab** dependency or container scanning report, or **Snyk**'s JSON) or ArtefactFlow's [native format](examples/vulnerabilities.json). You do not convert it yourself, and neither does the action: it sends the file your scanner wrote, as it wrote it, to ArtefactFlow's import, which detects the format and converts it. The same import is open to any CI system, so a pipeline outside GitHub records the same findings from the same report ([CI/CD with the API](https://docs.artefactflow.com/integrations/ci-cd-api/)).
 
-The upload **replaces the complete set** of vulnerabilities recorded for the version: it is not an append. A scanner's report is its complete view of the artefact, so this is exactly what a fresh scan expresses: whatever the report contains becomes the version's recorded set, and anything previously recorded and absent from it is removed.
+Each report has a **producer**, by default its format (`trivy`, `grype`, `cyclonedx`, `native`, `osv-scanner` or `snyk`). A SARIF log or a GitLab report can come from many tools, so its producer is the tool the report names (`trivy`, `grype`, `gemnasium`, ...): a tool's SARIF and its own JSON replace each other's findings. The import **replaces the findings that producer recorded** on the version before: it is not an append. A scanner's report is its complete view of the artefact, so whatever it contains becomes that producer's recorded set, and anything it recorded before and is absent now is removed. Findings other producers recorded on the version are kept, so a workflow that runs two scanners records both. Set `vulnerabilities-producer` when one version gets two reports of the same format, such as an image scan and a source scan, so that neither replaces the other. See [Several scanners on one version](https://docs.artefactflow.com/guides/vulnerabilities/#several-scanners-on-one-version).
 
-A scan that genuinely found nothing clears the set. With the native format, `{"vulnerabilities": []}` is how you say that explicitly. A file that is empty, or that never mentions `vulnerabilities` at all, is refused instead: a scan step that failed soft and wrote a placeholder should not silently delete a version's findings. A scanner report that parses but converts to nothing, when it was not an affirmatively empty scan, is likewise an error rather than a silent wipe.
+A scan that genuinely found nothing clears its producer's findings. With the native format, `{"vulnerabilities": []}` is how you say that explicitly. A file that is empty, or a native report that never mentions `vulnerabilities` at all, is refused instead: a scan step that failed soft and wrote a placeholder should not silently delete a version's findings. A scanner report whose entries cannot be converted is likewise refused rather than recorded as a clean scan.
 
-The upload needs no scope beyond the other two: replacing a version's findings is part of writing the version, so `version:write` covers it.
+The import needs no scope beyond the other two: recording a version's findings is part of writing the version, so `version:write` covers it.
+
+### When a report is checked
+
+What can be checked without ArtefactFlow is checked before anything is published: a missing file, an empty one, a file that is not JSON, and a report and VEX document over **32 MiB** together all fail the step before the version is created.
+
+Everything else is ArtefactFlow's to judge, and it can only judge a report against a version that exists, so the version is created first. A report ArtefactFlow refuses (an unrecognised format, more than 5,000 findings, findings that come to more than 4 MiB once converted, or text longer than it stores) therefore fails the step **after** the version was created. Nothing of the report is recorded in that case, `created` is `true` and `vulnerabilities-uploaded` is `false`, and the error says what was refused, naming the finding and the field. Fix the report and re-run the step with `if-exists: skip` to retry the import alone.
 
 ### Scanner formats
 
@@ -190,29 +198,33 @@ The upload needs no scope beyond the other two: replacing a version's findings i
 | Trivy | `SchemaVersion` + `Results` | Schema version 2. `Results[].Vulnerabilities` grouped by identifier |
 | Grype | `matches` + `descriptor.name` | Related vulnerabilities are not split into separate findings |
 | CycloneDX | `bomFormat` | The `vulnerabilities` array, ratings and any embedded `analysis` |
-| native | a `vulnerabilities` array, or a bare `[...]` | Forwarded exactly as written |
+| SARIF | `version` `2.1.0` + `runs` | SARIF 2.1.0, such as `trivy --format sarif` or `grype -o sarif`. The producer is the tool in `runs[0].tool.driver.name` |
+| OSV-Scanner | `results[].packages` | `osv-scanner scan source --format json` |
+| GitLab | `scan.type` + `vulnerabilities` | `gl-dependency-scanning-report.json` and `gl-container-scanning-report.json`; other GitLab report types, such as SAST, are not read. The producer is the scanner in `scan.scanner.id` |
+| Snyk | `packageManager` + `vulnerabilities`, or an array of them | `snyk test --json`, `snyk container test --json`, and the `--all-projects` array |
+| native | a `vulnerabilities` array, or a bare `[...]` | Recorded as written |
 
-The format is **detected, not declared**: the action recognises which of these you gave it, so a wrong flag cannot make it misread one report as another. If detection is ever ambiguous, or a future report needs forcing, `vulnerabilities-format` overrides it; a document that does not match the override is an error, not a silent fallback. An unrecognised document is always an error rather than a best-effort guess.
+The format is **detected, not declared**: ArtefactFlow recognises which of these you gave it, so a wrong flag cannot make it misread one report as another. If detection is ever ambiguous, `vulnerabilities-format` forces it; a document that does not match the override is an error, not a silent fallback. An unrecognised document is always an error rather than a best-effort guess.
 
-Converting is deliberate about a few things that a naive `jq` script gets wrong quietly:
+The conversion is deliberate about a few things that a naive `jq` script gets wrong quietly:
 
 - **One finding per identifier.** Scanners emit a result per (vulnerability × package); the recorded finding lists the affected components under `affects[]` instead of repeating the vulnerability.
-- **Severity is mapped, never guessed.** A severity the API does not know becomes `unknown` rather than an invented level.
+- **Severity is mapped, never guessed.** A severity ArtefactFlow does not know becomes `unknown` rather than an invented level.
 - **Ratings keep their order, NVD first.** Scanners score by vendor and the recorded rating carries no vendor field, so the order is the only provenance, and NVD leads.
-- **A missing source is filled deterministically.** Where a report names no advisory source, it is derived from the identifier (`CVE-` → NVD, `GHSA-` → GitHub Advisory Database), falling back to the scanner's name. It is never left empty, which the API rejects.
-- **Over-long descriptions are truncated, not fatal**, and the truncation is noted in the step log.
+- **A missing source is filled deterministically.** Where a report names no advisory source, it is derived from the identifier (`CVE-` → NVD, `GHSA-` → GitHub Advisory Database), falling back to the scanner's name.
+- **Results that name no vulnerability are left out, and counted.** A misconfiguration or code-scanning rule in a SARIF log, or an entry without an advisory identifier, is not a finding: the import leaves it out, the rest of the report imports, and the step's log says how many were left out and names them. A log holding only such results clears the producer's findings like a clean scan.
+- **Several identifiers become one finding.** When a vulnerability carries several identifiers (OSV-Scanner, GitLab, Snyk), a single CVE becomes the finding's id and the others its aliases.
+- **Nothing is cut short.** Text longer than ArtefactFlow stores refuses the report, naming the finding and the field, rather than being truncated.
 
-Native reports are the exception to conversion: they are forwarded as the exact bytes you wrote, so a value the model would treat as empty (a CVSS score of `0.0` on an informational finding among them) is never dropped. Unrecognised fields in a native report are an error rather than being silently discarded.
+A native report is recorded as written, so a value Go would treat as empty (a CVSS score of `0.0` on an informational finding among them) is never dropped. Unrecognised fields in a native report are an error rather than being silently discarded.
 
-To see exactly what will be uploaded, set `converted-output-file` and the converted native JSON is written there before the upload runs, useful for archiving alongside the build, or for debugging a scanner-format question. Give it a path inside the workspace (a relative path such as `converted.json`); the action runs in a container, and only the workspace is visible to later steps, so a file written elsewhere would not be readable by a subsequent `upload-artifact` step.
-
-Supported scanner schemas are exercised against the latest Trivy and Grype releases by a scheduled job ([`.github/workflows/scanner-drift.yml`](.github/workflows/scanner-drift.yml)), so a scanner changing its output shape is caught here rather than in your pipeline.
+To see exactly what a report converts to, set `converted-output-file`. The action then asks ArtefactFlow for a dry run first, which converts and checks the report and records nothing, writes its answer there as native JSON, and only then imports the report. The file is useful for archiving alongside the build, or for debugging a scanner-format question, and can itself be uploaded again as a native report. Give it a path inside the workspace (a relative path such as `converted.json`); the action runs in a container, and only the workspace is visible to later steps, so a file written elsewhere would not be readable by a subsequent `upload-artifact` step.
 
 ### VEX: attaching triage to findings
 
 A raw scan is noisy: many CVEs in your dependencies are not exploitable in the way you use them. A [CycloneDX VEX](https://docs.artefactflow.com/guides/vulnerabilities/) document records that judgement, and this action attaches it to the findings so they arrive triaged instead of as a wall of untriaged red.
 
-VEX is a **separate input from the scan**, because it is an overlay rather than a scan of its own: a VEX document carries assessments and usually no severities, so treating it as a third report format would produce findings with no rating. Supply it alongside your scan and it is merged into the same upload:
+VEX is a **separate input from the scan**, because it is an overlay rather than a scan of its own: a VEX document carries assessments and usually no severities, so treating it as a third report format would produce findings with no rating. Supply it alongside your scan and it is sent in the same import:
 
 ```yaml
 - uses: artefactflow/publish-version-action@v1
@@ -226,9 +238,9 @@ VEX is a **separate input from the scan**, because it is an overlay rather than 
     vex-file: vex.json
 ```
 
-Each VEX entry is matched to a finding by vulnerability identifier and contributes its `state`, `justification`, `response`, and `detail`. A `state` or `justification` the API does not accept is an error naming the finding, not a silent drop. An assessment matching no finding is reported as a warning: it usually means the scan and the VEX are from different builds.
+Each VEX entry is matched to a finding by vulnerability identifier and contributes its `state`, `justification`, `response`, and `detail`. A `state` or `justification` ArtefactFlow does not accept refuses the import, naming the finding, rather than being dropped. An assessment matching no finding is reported as a warning in the step log: it usually means the scan and the VEX are from different builds.
 
-A native report takes no `vex-file`: it carries each finding's `analysis` inline, so that is where its assessments go. Either way the triage travels in the upload, which `version:write` covers. Changing the triage of findings that are already recorded is not something this action does: it needs `vulnerability:write`, which ArtefactFlow does not grant to service accounts, so it is kept to people working in ArtefactFlow itself.
+A native report takes no `vex-file`: it carries each finding's `analysis` inline, so that is where its assessments go, and ArtefactFlow refuses a VEX document sent beside one. Either way the triage travels in the import, which `version:write` covers. Changing the triage of findings that are already recorded is not something this action does: it needs `vulnerability:write`, which ArtefactFlow does not grant to service accounts, so it is kept to people working in ArtefactFlow itself.
 
 ## Re-runs, and versions that already exist
 
@@ -238,7 +250,7 @@ By default, creating a version that already exists fails: publishing the same ve
     if-exists: skip
 ```
 
-With `skip`, an existing version is treated as success. The existing version is left exactly as it is and no fields are changed, but a configured vulnerability upload still runs, so re-running the job converges on the state you asked for. The `created` output tells you which happened.
+With `skip`, an existing version is treated as success. The existing version is left exactly as it is and no fields are changed, but a configured import still runs, so re-running the job converges on the state you asked for. That is also how to retry an import that failed after the version was created. The `created` output tells you which happened.
 
 ## Examples
 
@@ -295,7 +307,7 @@ The two actions are designed to be used together, and share the same credentials
     build-state: success
     hash: ${{ steps.build.outputs.digest }}   # already of the form sha256:<hex>
     upload-vulnerabilities: true
-    vulnerabilities-file: scan.json           # Trivy JSON, converted automatically
+    vulnerabilities-file: scan.json           # Trivy JSON, as Trivy wrote it
 ```
 
 ### Record pre-release builds without promoting them
@@ -341,7 +353,7 @@ The client id is not sensitive, so a repository or organisation **variable** is 
 
 ### Scopes and team access
 
-The service account needs `artefact:read` to resolve the name and `version:write` to create the version. `version:write` also covers uploading vulnerabilities, with any VEX sent in the same upload.
+The service account needs `artefact:read` to resolve the name and `version:write` to create the version. `version:write` also covers importing the scan report, with any VEX sent in the same import.
 
 A higher action on the same resource covers a lower one: `version:write` and `version:delete` both satisfy `version:read`, and likewise for `artefact:`. Its token will list only the highest action per resource, which is why a working account can show `version:write` and no `version:read` at all.
 
@@ -357,9 +369,10 @@ The client secret is never logged, and it is redacted from every error the actio
 
 A few behaviours are worth knowing about because they are invisible until they matter:
 
-- **Transient failures are retried.** Connection errors, `429`, and `5xx` get up to three attempts with exponential backoff and jitter, honouring `Retry-After`. Permanent failures (anything else in the `4xx` range) fail immediately, because retrying them would only waste the job's time.
-- **A retried create that then conflicts is treated as this run's own work.** If the first attempt failed transiently and the retry reports that the version already exists, the overwhelmingly likely explanation is that the first attempt did land and only its reply was lost. The action reports the version as created, uploads the vulnerabilities, and logs a warning saying so: failing there would break a pipeline that published correctly. A genuine duplicate conflicts on the first attempt and is not affected.
-- **Each request times out after 60 seconds, and the whole run after 5 minutes.** A step that fails at around five minutes has hit the second of these.
+- **Transient failures are retried.** Connection errors, `429`, and `5xx` get up to three attempts with exponential backoff and jitter. A `Retry-After` from the server is honoured up to 30 seconds; ArtefactFlow asks for 10 while it is busy converting other reports. Permanent failures (anything else in the `4xx` range) fail immediately, because retrying them would only waste the job's time.
+- **A retried create that then conflicts is treated as this run's own work.** If the first attempt failed transiently and the retry reports that the version already exists, the overwhelmingly likely explanation is that the first attempt did land and only its reply was lost. The action reports the version as created, imports the scan report, and logs a warning saying so: failing there would break a pipeline that published correctly. A genuine duplicate conflicts on the first attempt and is not affected.
+- **Each request times out after 60 seconds, and the whole run after 10 minutes.** That leaves room for the slowest run the retries allow: a dry run and an import that each take three attempts. A step that fails at around ten minutes has hit the second of these.
+- **An import is retried like any other call.** It replaces its producer's findings with the same report each time, so a retry after a lost answer records exactly what the first attempt did. That includes ArtefactFlow answering `429` because it is converting other reports at that moment: the action waits and tries again, up to three attempts.
 - **`version-url` is derived when the API does not send a `Location` header**, and a relative `Location` is resolved against `api-url`, so the output is always usable as it stands.
 - **The minted token and the client secret are both masked** with the runner before any request is made, and the token is scrubbed from any API response the action turns into an error.
 
@@ -370,6 +383,25 @@ The action itself only talks to the ArtefactFlow API and needs no GitHub token. 
 ## Requirements
 
 This is a container action, so it runs on Linux runners only. Windows and macOS runners cannot run it.
+
+## Upgrading from 1.0.x
+
+The import moved into ArtefactFlow: the action no longer converts the report itself, it sends the file as your scanner wrote it. Three things behave differently as a result.
+
+- **The default producer is now the report's format.** The previous release converted the report and uploaded the result as producer `native`, whatever the scanner. The import now records a Trivy report as `trivy`, a Grype report as `grype`, and so on (see [Uploading vulnerabilities](#uploading-vulnerabilities)). A re-run onto a version the previous release filled, with `if-exists: skip`, therefore records the new findings **beside** the old ones rather than replacing them, since they belong to a different producer. A native report is unaffected: its producer was and still is `native`. To clean up such a version, delete the `native` findings once. That takes `vulnerability:write`, which ArtefactFlow does not grant to service accounts, so run it as a person who holds it:
+
+  ```sh
+  ARTEFACT_ID=$(curl --fail-with-body -s -H "Authorization: Bearer $TOKEN" \
+    "https://api.artefactflow.app/v1/artefacts/resolve?name=acme-payment-service" | jq -r .id)
+  curl --fail-with-body -X DELETE -H "Authorization: Bearer $TOKEN" \
+    "https://api.artefactflow.app/v1/artefacts/$ARTEFACT_ID/versions/1.4.2/vulnerabilities?producer=native"
+  ```
+
+  This removes only that producer's findings; the analysis recorded on them is remembered and carries over if the same vulnerability is reported again. Versions published only by this release need nothing. If you would rather keep the old producer name, set `vulnerabilities-producer: native`.
+- **Over-long text refuses the report.** The previous release cut a description longer than ArtefactFlow stores, and noted that in the log. The import refuses the report instead, naming the finding and the field, so nothing is recorded in a shortened form.
+- **A report ArtefactFlow refuses fails after the version was created.** The previous release converted the report before creating the version, so a report it could not read failed the step with nothing published. Only a missing, empty, non-JSON or oversized file still fails that early (see [When a report is checked](#when-a-report-is-checked)). Anything else ArtefactFlow refuses fails the step with `created: true` and `vulnerabilities-uploaded: false`: fix the report and re-run the step with `if-exists: skip` to retry the import alone.
+
+The release also adds `vulnerabilities-producer-version`, which records the scanner's version with its findings when the report states none (or the wrong one), and reads SARIF, OSV-Scanner, GitLab and Snyk reports as well as Trivy, Grype, CycloneDX and native.
 
 ## Troubleshooting
 
@@ -383,10 +415,13 @@ This is a container action, so it runs on Linux runners only. Windows and macOS 
 | `HTTP 402` | The organisation is over its plan limit. No retry or input change resolves it |
 | `HTTP 403` | Missing `artefact:read` or `version:write`, or the principal is not on a team with write access to the artefact's group |
 | `resolve artefact "…": HTTP 404` | No artefact of that name in your organisation. The match is exact and case-sensitive |
-| `upload vulnerabilities for version …: HTTP 404` | The version was deleted between the create and the upload |
+| `import vulnerabilities for version …: HTTP 404` | The version was deleted between the create and the import |
 | `version 1.4.2 ... already exists` | The version was published before. Set `if-exists: skip` if a re-run is expected |
-| `version 1.4.2 was created, but the vulnerability upload failed` | The version is intact and nothing was partially recorded. Fix the cause and re-run the step to retry the upload alone |
-| `parse vulnerabilities file …` | The report is not in the ArtefactFlow vulnerabilities format. Unknown fields are rejected on purpose |
+| `version 1.4.2 was created, but importing … failed` | The version is intact and nothing of the report was recorded. The error quotes ArtefactFlow's reason, naming the finding and field it refused. Fix the cause and re-run the step with `if-exists: skip` to retry the import alone |
+| `could not recognise the report format` | The file is not a report in one of the [scanner formats](#scanner-formats) or ArtefactFlow's native format, or is one of them without the fields that identify it. Check that the scanner wrote JSON |
+| `HTTP 413` or `… at most 32 MiB in one import` | The report is too large: over 32 MiB as a file, or (`ArtefactFlow refused the import as too large`) more than 4 MiB of findings once converted. Scan with fewer findings, such as only those with a fix (`--ignore-unfixed` in Trivy), or a slimmer base image |
+| `HTTP 429` after three attempts | ArtefactFlow stayed busy converting other reports. Re-run the step with `if-exists: skip` to retry the import alone |
+| `… is not a JSON document` | The report or VEX file is not JSON: a scanner writing its table output, or a file cut off mid-write |
 
 Errors quote the API's own message and its log id, which is what to include when asking for help with a `403` or a `500`.
 

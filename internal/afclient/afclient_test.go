@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -132,7 +135,7 @@ func TestCreateVersionFallsBackWhenTheResponseBodyIsUnhelpful(t *testing.T) {
 func TestCreateVersionConflictIsMatchable(t *testing.T) {
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusConflict)
-		io.WriteString(w, `{"code":"VERSION00409","message":"already exists","logid":"abc123"}`)
+		io.WriteString(w, `{"code":"VERSION00409","message":"already exists","log_id":"abc123"}`)
 	}))
 	_, _, err := c.CreateVersion(context.Background(), testArtefactID, VersionInput{Version: "1.4.2"})
 	if !errors.Is(err, ErrVersionExists) {
@@ -178,7 +181,7 @@ func TestStatusErrorsAreActionable(t *testing.T) {
 func TestForbiddenNamesBothAuthorizationAxes(t *testing.T) {
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
-		io.WriteString(w, `{"code":"AUTH00403","message":"Forbidden","logid":"xyz"}`)
+		io.WriteString(w, `{"code":"AUTH00403","message":"Forbidden","log_id":"xyz"}`)
 	}))
 	_, _, err := c.CreateVersion(context.Background(), testArtefactID, VersionInput{Version: "1.4.2"})
 	if err == nil {
@@ -224,42 +227,213 @@ func TestErrorsNeverContainTheToken(t *testing.T) {
 	}
 }
 
-func TestReplaceVulnerabilitiesAddressesVersionBySemVer(t *testing.T) {
-	var gotPath, gotMethod string
-	var gotBody VulnerabilitiesInput
+// importRequestSeen is what the import endpoint received, decoded from the multipart body.
+type importRequestSeen struct {
+	method, path string
+	query        url.Values
+	parts        map[string]string
+	partTypes    map[string]string
+	fileNames    map[string]string
+}
+
+func readImport(t *testing.T, r *http.Request) importRequestSeen {
+	t.Helper()
+	seen := importRequestSeen{method: r.Method, path: r.URL.Path, query: r.URL.Query(), parts: map[string]string{}, partTypes: map[string]string{}, fileNames: map[string]string{}}
+	mr, err := r.MultipartReader()
+	if err != nil {
+		t.Errorf("the import was not sent as multipart form data: %v", err)
+		return seen
+	}
+	for {
+		p, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Errorf("read part: %v", err)
+			break
+		}
+		content, _ := io.ReadAll(p)
+		seen.parts[p.FormName()] = string(content)
+		seen.partTypes[p.FormName()] = p.Header.Get("Content-Type")
+		seen.fileNames[p.FormName()] = p.FileName()
+	}
+	return seen
+}
+
+func TestImportVulnerabilitiesSendsTheReportAsItWasWritten(t *testing.T) {
+	var seen importRequestSeen
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath, gotMethod = r.URL.Path, r.Method
-		json.NewDecoder(r.Body).Decode(&gotBody)
-		io.WriteString(w, `{"metadata":{"total_records":1}}`)
+		seen = readImport(t, r)
+		io.WriteString(w, `{"metadata":{"total_records":12},"vulnerabilities":[],"producer":{"name":"trivy","version":"0.58.1"},"import":{"format":"trivy","vex_matched":1,"vex_unmatched":["CVE-2024-1"],"skipped_rules":1,"skipped_rule_ids":["DS002"]}}`)
 	}))
 
-	in := VulnerabilitiesInput{Vulnerabilities: []json.RawMessage{json.RawMessage(`{"id":"CVE-2023-44487","source":{"name":"NVD"}}`)}}
-	if err := c.ReplaceVulnerabilities(context.Background(), testArtefactID, "1.4.2", in); err != nil {
-		t.Fatalf("ReplaceVulnerabilities: %v", err)
+	report := `{"SchemaVersion":2,"Results":[]}`
+	res, err := c.ImportVulnerabilities(context.Background(), testArtefactID, "1.4.2", ImportRequest{
+		Report: []byte(report), ReportName: "out/trivy.json",
+		VEX: []byte(`{"bomFormat":"CycloneDX"}`), VEXName: "vex.json",
+	})
+	if err != nil {
+		t.Fatalf("ImportVulnerabilities: %v", err)
 	}
-	if gotMethod != http.MethodPut {
-		t.Errorf("method = %s, want PUT: the endpoint replaces the whole set", gotMethod)
+	if seen.method != http.MethodPost || seen.path != "/v1/artefacts/"+testArtefactID+"/versions/1.4.2/vulnerabilities/import" {
+		t.Errorf("request = %s %s, want POST to the version's import endpoint, addressed by its SemVer string", seen.method, seen.path)
 	}
-	if gotPath != "/v1/artefacts/"+testArtefactID+"/versions/1.4.2/vulnerabilities" {
-		t.Errorf("path = %q, want the version addressed by its SemVer string", gotPath)
+	// The report travels byte for byte: converting it is the API's job, not this client's.
+	if seen.parts["report"] != report {
+		t.Errorf("report part = %q, want the file exactly as written", seen.parts["report"])
 	}
-	if len(gotBody.Vulnerabilities) != 1 {
-		t.Errorf("body = %+v", gotBody)
+	if seen.parts["vex"] == "" || seen.partTypes["report"] != "application/json" || seen.partTypes["vex"] != "application/json" {
+		t.Errorf("parts = %v with types %v, want a report and a vex part, both JSON", seen.parts, seen.partTypes)
+	}
+	// Only the base name: a runner's workspace path is nobody else's business.
+	if seen.fileNames["report"] != "trivy.json" {
+		t.Errorf("report filename = %q, want the base name", seen.fileNames["report"])
+	}
+	if len(seen.query) != 0 {
+		t.Errorf("query = %v, want none when nothing is forced", seen.query)
+	}
+	want := ImportResult{Producer: "trivy", ProducerVersion: "0.58.1", VersionFindings: 12, Import: ImportSummary{Format: "trivy", VEXMatched: 1, VEXUnmatched: []string{"CVE-2024-1"}, SkippedRules: 1, SkippedRuleIDs: []string{"DS002"}}}
+	if !reflect.DeepEqual(*res, want) {
+		t.Errorf("result = %+v, want %+v", *res, want)
 	}
 }
 
-func TestReplaceVulnerabilitiesSendsAnEmptySetExplicitly(t *testing.T) {
-	var raw map[string]json.RawMessage
+func TestImportVulnerabilitiesPassesTheOptions(t *testing.T) {
+	var seen importRequestSeen
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&raw)
-		w.WriteHeader(http.StatusNoContent)
+		seen = readImport(t, r)
+		io.WriteString(w, `{"producer":"image-scan","vulnerabilities":[{"id":"CVE-1"},{"id":"CVE-2"}],"import":{"format":"trivy","vex_matched":0}}`)
 	}))
-	if err := c.ReplaceVulnerabilities(context.Background(), testArtefactID, "1.4.2", VulnerabilitiesInput{}); err != nil {
-		t.Fatalf("ReplaceVulnerabilities: %v", err)
+
+	res, err := c.ImportVulnerabilities(context.Background(), testArtefactID, "1.4.2", ImportRequest{Report: []byte(`{}`), ReportName: "r.json", Format: "trivy", Producer: "image-scan", ProducerVersion: "0.58.1 (patched)", DryRun: true})
+	if err != nil {
+		t.Fatalf("ImportVulnerabilities: %v", err)
 	}
-	// Clearing a version's findings is a legitimate outcome of a clean scan, so the key must be an empty array rather than null.
-	if got := string(raw["vulnerabilities"]); got != "[]" {
-		t.Errorf("vulnerabilities = %s, want [] so a clean scan clears the recorded set", got)
+	for key, want := range map[string]string{"format": "trivy", "producer": "image-scan", "producer_version": "0.58.1 (patched)", "dry_run": "true"} {
+		if got := seen.query.Get(key); got != want {
+			t.Errorf("query %s = %q, want %q", key, got, want)
+		}
+	}
+	if _, ok := seen.parts["vex"]; ok {
+		t.Error("a vex part was sent without a VEX document")
+	}
+	// A dry run's answer is handed back whole, so the caller can write out exactly what would be recorded.
+	if res.Findings != 2 || res.Producer != "image-scan" || !strings.Contains(string(res.Document), `"CVE-2"`) {
+		t.Errorf("result = %+v, want the dry run's findings and document", res)
+	}
+}
+
+// The findings are recorded once the API says 200. An answer the client cannot read must not turn that into a failure, or a re-run would import the report a second time for nothing.
+func TestImportVulnerabilitiesToleratesAnUnreadableAnswer(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `not json`)
+	}))
+	if _, err := c.ImportVulnerabilities(context.Background(), testArtefactID, "1.4.2", ImportRequest{Report: []byte(`{}`), ReportName: "r.json"}); err != nil {
+		t.Fatalf("ImportVulnerabilities failed on a 200: %v", err)
+	}
+	// A dry run is different: nothing was recorded, and the document is what was asked for.
+	if _, err := c.ImportVulnerabilities(context.Background(), testArtefactID, "1.4.2", ImportRequest{Report: []byte(`{}`), ReportName: "r.json", DryRun: true}); err == nil {
+		t.Fatal("a dry run with an unreadable answer succeeded")
+	}
+}
+
+// A refused report is answered with the finding and field at fault in the details, and those are what tell the workflow author what to fix.
+func TestImportRefusalQuotesTheDetails(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		details := make([]string, 0, 7)
+		for i := range 7 {
+			details = append(details, fmt.Sprintf(`{"field":"vulnerabilities[CVE-%d].description","issue":"must be at most 8192 characters"}`, i))
+		}
+		io.WriteString(w, `{"code":"VULN00001","message":"The report was refused","log_id":"abc123","details":[`+strings.Join(details, ",")+`]}`)
+	}))
+	_, err := c.ImportVulnerabilities(context.Background(), testArtefactID, "1.4.2", ImportRequest{Report: []byte(`{}`), ReportName: "r.json"})
+	if err == nil {
+		t.Fatal("ImportVulnerabilities succeeded on a 400")
+	}
+	for _, want := range []string{"The report was refused", "vulnerabilities[CVE-0].description: must be at most 8192 characters", "and 2 more", "log id abc123"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want it to mention %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "CVE-5") {
+		t.Errorf("error = %v, want only the first details quoted", err)
+	}
+}
+
+func TestOversizedRequestNamesTheLimit(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusRequestEntityTooLarge)
+		io.WriteString(w, `<html><body>413 Request Entity Too Large</body></html>`)
+	}))
+	_, err := c.ImportVulnerabilities(context.Background(), testArtefactID, "1.4.2", ImportRequest{Report: []byte(`{}`), ReportName: "r.json"})
+	if err == nil || !strings.Contains(err.Error(), "at most 32 MiB") {
+		t.Errorf("error = %v, want it to state the limit", err)
+	}
+}
+
+// ArtefactFlow's own 413 says which limit was hit, which may be the converted findings of a report well under 32 MiB, so its reason is quoted rather than a size the report does not exceed.
+func TestOversizedFindingsQuoteArtefactFlowsReason(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusRequestEntityTooLarge)
+		io.WriteString(w, `{"code":"GEN00009","message":"The request is too large; reduce its size and try again","log_id":"abc123","details":[{"field":"report","issue":"the report converts to more than 4194304 bytes of findings"}]}`)
+	}))
+	_, err := c.ImportVulnerabilities(context.Background(), testArtefactID, "1.4.2", ImportRequest{Report: []byte(`{}`), ReportName: "r.json"})
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	for _, want := range []string{"refused the import as too large", "report: the report converts to more than 4194304 bytes of findings", "log id abc123"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want it to mention %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "at most 32 MiB") {
+		t.Errorf("error = %v, want no claim about a request size the report does not exceed", err)
+	}
+}
+
+// An import ArtefactFlow is too busy to convert (429 with Retry-After) is retried, and succeeds once there is room.
+func TestBusyImportIsRetried(t *testing.T) {
+	var attempts int
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			io.WriteString(w, `{"code":"GEN00011","message":"Too many requests; please try again later"}`)
+			return
+		}
+		io.WriteString(w, `{"metadata":{"total_records":0}}`)
+	}), WithRetry(3, time.Millisecond, 2*time.Millisecond))
+	if _, err := c.ImportVulnerabilities(context.Background(), testArtefactID, "1.4.2", ImportRequest{Report: []byte(`{"matches":[]}`), ReportName: "grype.json"}); err != nil {
+		t.Fatalf("ImportVulnerabilities: %v", err)
+	}
+	if attempts != 2 {
+		t.Errorf("attempts = %d, want the busy answer retried once", attempts)
+	}
+}
+
+// A retried import must present the same multipart body, report included, on every attempt.
+func TestRetriedImportKeepsItsBody(t *testing.T) {
+	var attempts int
+	var last importRequestSeen
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		last = readImport(t, r)
+		if attempts < 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		io.WriteString(w, `{"metadata":{"total_records":0}}`)
+	}), WithRetry(3, time.Millisecond, 2*time.Millisecond))
+
+	if _, err := c.ImportVulnerabilities(context.Background(), testArtefactID, "1.4.2", ImportRequest{Report: []byte(`{"matches":[]}`), ReportName: "grype.json"}); err != nil {
+		t.Fatalf("ImportVulnerabilities: %v", err)
+	}
+	if attempts != 2 || last.parts["report"] != `{"matches":[]}` {
+		t.Errorf("attempts = %d, last report = %q, want the report intact on the retry", attempts, last.parts["report"])
 	}
 }
 
@@ -342,15 +516,45 @@ func TestRetriedWriteKeepsItsBody(t *testing.T) {
 }
 
 func TestRetryPolicyDelayHonoursRetryAfterAndCeiling(t *testing.T) {
-	p := retryPolicy{maxAttempts: 5, baseDelay: 100 * time.Millisecond, maxDelay: time.Second}
-	if got := p.delay(0, 2*time.Second); got != time.Second {
-		t.Errorf("delay with a long Retry-After = %v, want it capped at maxDelay", got)
+	p := retryPolicy{maxAttempts: 5, baseDelay: 100 * time.Millisecond, maxDelay: time.Second, maxRetryAfter: 3 * time.Second}
+	if got := p.delay(0, 2*time.Second); got != 2*time.Second {
+		t.Errorf("delay with a Retry-After over maxDelay = %v, want it honoured: maxDelay bounds the client's own backoff, not the server's request", got)
+	}
+	if got := p.delay(0, 10*time.Second); got != 3*time.Second {
+		t.Errorf("delay with a long Retry-After = %v, want it capped at maxRetryAfter", got)
 	}
 	// Full jitter puts the backoff in [d/2, d]; the point is that it never exceeds the ceiling.
 	for attempt := range 6 {
 		if got := p.delay(attempt, 0); got > time.Second {
 			t.Errorf("delay(%d) = %v, want at most maxDelay", attempt, got)
 		}
+	}
+}
+
+// ArtefactFlow's import gate answers 429 with `Retry-After: 10`. Cutting that to the backoff ceiling would spend the next attempt on a request the server already said it would refuse, and three attempts would be gone in seconds.
+func TestDefaultRetryHonoursTheImportGatesRetryAfter(t *testing.T) {
+	p := defaultRetry()
+	if got := p.delay(0, 10*time.Second); got != 10*time.Second {
+		t.Errorf("default delay for Retry-After: 10 = %v, want 10s", got)
+	}
+	if got := p.delay(0, 60*time.Second); got != 30*time.Second {
+		t.Errorf("default delay for Retry-After: 60 = %v, want it capped at 30s so one API cannot stall the job", got)
+	}
+	for attempt := range 6 {
+		if got := p.delay(attempt, 0); got > p.maxDelay {
+			t.Errorf("default backoff delay(%d) = %v, want at most %v", attempt, got, p.maxDelay)
+		}
+	}
+}
+
+// WithRetry is how tests make a retry fast; a server answering with Retry-After must not slow them down past the ceiling they set.
+func TestWithRetryCapsRetryAfterAtItsCeiling(t *testing.T) {
+	c, err := New("http://af.example", "tok", WithRetry(3, time.Millisecond, 2*time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.retry.delay(0, 10*time.Second); got != 2*time.Millisecond {
+		t.Errorf("delay = %v, want a WithRetry policy to cap Retry-After at its maxDelay", got)
 	}
 }
 

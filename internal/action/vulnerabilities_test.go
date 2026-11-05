@@ -1,8 +1,6 @@
 package action
 
 import (
-	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,7 +9,6 @@ import (
 	"github.com/artefactflow/publish-version-action/internal/afclient"
 )
 
-// writeReport puts a report on disk and returns its path. Shared by every test in the package that needs one.
 func writeReport(t *testing.T, content string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "vulns.json")
@@ -21,161 +18,148 @@ func writeReport(t *testing.T, content string) string {
 	return path
 }
 
-// wireBody renders what would actually be sent to the API, which is the only thing that matters for a full-replace endpoint.
-func wireBody(t *testing.T, in afclient.VulnerabilitiesInput) string {
-	t.Helper()
-	raw, err := json.Marshal(in)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	return string(raw)
+func uploadEnv(report string) map[string]string {
+	vars := validEnv()
+	vars["INPUT_UPLOAD-VULNERABILITIES"] = "true"
+	vars["INPUT_VULNERABILITIES-FILE"] = report
+	return vars
 }
 
-func TestLoadVulnerabilitiesWrappedObject(t *testing.T) {
-	in, err := LoadVulnerabilities(writeReport(t, `{"vulnerabilities":[{"id":"CVE-2023-44487","source":{"name":"NVD"},"ratings":[{"score":7.5,"severity":"high","method":"CVSSv31"}],"cwes":[400],"analysis":{"state":"in_triage"}}]}`))
-	if err != nil {
-		t.Fatalf("LoadVulnerabilities: %v", err)
-	}
-	if len(in.Vulnerabilities) != 1 {
-		t.Fatalf("got %+v", in.Vulnerabilities)
-	}
-	for _, want := range []string{`"id":"CVE-2023-44487"`, `"score":7.5`, `"state":"in_triage"`, `"cwes":[400]`} {
-		if !strings.Contains(wireBody(t, in), want) {
-			t.Errorf("wire body %s is missing %s", wireBody(t, in), want)
-		}
-	}
-}
+// The files travel as they were written: converting them is ArtefactFlow's job, so the action must not reshape them on the way.
+func TestLoadConfigReadsTheReportAsItWasWritten(t *testing.T) {
+	report := `{"SchemaVersion": 2, "Results": []}`
+	vex := `{"bomFormat":"CycloneDX","vulnerabilities":[]}`
+	vars := uploadEnv(writeReport(t, report))
+	vars["INPUT_VEX-FILE"] = writeReport(t, vex)
+	vars["INPUT_VULNERABILITIES-FORMAT"] = "Trivy"
+	vars["INPUT_VULNERABILITIES-PRODUCER"] = "image-scan"
+	vars["INPUT_VULNERABILITIES-PRODUCER-VERSION"] = "0.58.1 (patched)"
 
-func TestLoadVulnerabilitiesBareArray(t *testing.T) {
-	in, err := LoadVulnerabilities(writeReport(t, `[{"id":"CVE-2024-28180","source":{"name":"NVD"}}]`))
-	if err != nil {
-		t.Fatalf("LoadVulnerabilities: %v", err)
+	cfg := loadFrom(t, vars)
+	in := cfg.Import
+	if string(in.Report) != report || string(in.VEX) != vex {
+		t.Errorf("report = %q, vex = %q, want both byte for byte", in.Report, in.VEX)
 	}
-	if len(in.Vulnerabilities) != 1 || !strings.Contains(wireBody(t, in), "CVE-2024-28180") {
-		t.Fatalf("got %s", wireBody(t, in))
+	if in.Format != "trivy" || in.Producer != "image-scan" || in.ProducerVersion != "0.58.1 (patched)" || in.DryRun {
+		t.Errorf("import = %+v, want the format lower-cased, the producer as given, and no dry run", in)
+	}
+	if in.ReportName != vars["INPUT_VULNERABILITIES-FILE"] || in.VEXName != vars["INPUT_VEX-FILE"] {
+		t.Errorf("names = %q, %q, want the input paths", in.ReportName, in.VEXName)
 	}
 }
 
-// A clean scan is a real result, and the upload replaces the whole set, so an explicitly empty list is how a workflow clears stale findings.
-func TestLoadVulnerabilitiesAllowsAnExplicitlyEmptyList(t *testing.T) {
-	for _, content := range []string{`{"vulnerabilities":[]}`, `[]`} {
-		in, err := LoadVulnerabilities(writeReport(t, content))
-		if err != nil {
-			t.Fatalf("LoadVulnerabilities(%s): %v", content, err)
-		}
-		if len(in.Vulnerabilities) != 0 {
-			t.Fatalf("got %+v", in.Vulnerabilities)
-		}
+func TestLoadConfigLeavesFormatAndProducerToTheAPIByDefault(t *testing.T) {
+	cfg := loadFrom(t, uploadEnv(writeReport(t, `{"vulnerabilities":[]}`)))
+	if cfg.Import.Format != "" || cfg.Import.Producer != "" || cfg.Import.ProducerVersion != "" || cfg.Import.VEX != nil {
+		t.Errorf("import = %+v, want detection and the default producer left to ArtefactFlow", cfg.Import)
 	}
 }
 
-// A file that never mentions `vulnerabilities` is a mistake, not an instruction to delete everything recorded. Because the endpoint is a full replace, treating the two alike would silently wipe a version's findings whenever a scan step wrote a placeholder.
-func TestLoadVulnerabilitiesRefusesAnAbsentList(t *testing.T) {
-	for _, content := range []string{`{}`, `{"vulnerabilities":null}`} {
-		_, err := LoadVulnerabilities(writeReport(t, content))
-		if err == nil {
-			t.Fatalf("LoadVulnerabilities(%s) succeeded; it would have deleted every recorded finding", content)
-		}
-		if !strings.Contains(err.Error(), "no `vulnerabilities` key") {
-			t.Errorf("error = %v, want it to name the missing key", err)
-		}
-	}
-}
-
-// The findings are forwarded as the bytes they were read from. Re-encoding them from the Go model would drop anything the model treats as empty, and a CVSS score of 0.0 is a real score for an informational finding.
-func TestLoadVulnerabilitiesPreservesZeroValues(t *testing.T) {
-	in, err := LoadVulnerabilities(writeReport(t, `{"vulnerabilities":[{"id":"CVE-1","source":{"name":"NVD"},"ratings":[{"score":0,"severity":"none"}]}]}`))
-	if err != nil {
-		t.Fatalf("LoadVulnerabilities: %v", err)
-	}
-	if got := wireBody(t, in); !strings.Contains(got, `"score":0`) {
-		t.Errorf("wire body = %s, want the zero score preserved", got)
-	}
-}
-
-// Every field the API accepts has to survive. A field modelled nowhere would be rejected by the strict decode, turning a valid report into a hard failure.
-func TestLoadVulnerabilitiesAcceptsTheFullSchema(t *testing.T) {
-	report := `{"vulnerabilities":[{
-		"id":"CVE-1",
-		"source":{"name":"NVD","url":"https://nvd.nist.gov/vuln/detail/CVE-1"},
-		"ratings":[{"score":9.8,"severity":"critical","method":"CVSSv31","vector":"AV:N/AC:L"}],
-		"cwes":[79,400],
-		"description":"d",
-		"recommendation":"r",
-		"analysis":{"state":"not_affected","justification":"code_not_reachable","response":["will_not_fix"],"detail":"x"},
-		"affects":[{"ref":"pkg:golang/example","versions":[{"version":"1.0.0","range":"vers:semver/>=1.0.0|<2.0.0","status":"affected"}]}],
-		"published":"2024-01-01T00:00:00Z",
-		"updated":"2024-02-01T00:00:00Z"
-	}]}`
-	in, err := LoadVulnerabilities(writeReport(t, report))
-	if err != nil {
-		t.Fatalf("a report using every documented field must be accepted: %v", err)
-	}
-	// The rarely-modelled fields are the ones most at risk of being dropped, so check they reach the wire.
-	for _, want := range []string{`"affects"`, `"published"`, `"updated"`, `"vector"`, `"response"`} {
-		if !strings.Contains(wireBody(t, in), want) {
-			t.Errorf("wire body lost %s", want)
-		}
-	}
-}
-
-func TestLoadVulnerabilitiesRejectsBadReports(t *testing.T) {
+func TestLoadConfigRejectsUnusableImportInputs(t *testing.T) {
+	report := writeReport(t, `{"vulnerabilities":[]}`)
 	tests := []struct {
-		name    string
-		content string
-		want    string
+		name   string
+		mutate func(map[string]string)
+		want   string
 	}{
-		// Silently dropping half a report is far worse here than failing, because the upload replaces everything recorded for the version.
-		{"misspelled field", `{"vulnerabilities":[{"id":"CVE-1","source":{"name":"NVD"},"serverity":"high"}]}`, "serverity"},
-		{"unknown top-level key", `{"vulnerabilities":[],"SchemaVersion":2}`, "SchemaVersion"},
-		{"entry without an id", `{"vulnerabilities":[{"description":"no id","source":{"name":"NVD"}}]}`, "no `id`"},
-		// The API requires a source; without this check the whole report is rejected only after the version has been created.
-		{"entry without a source", `{"vulnerabilities":[{"id":"CVE-1"}]}`, "no `source.name`"},
-		{"entry with an unnamed source", `{"vulnerabilities":[{"id":"CVE-1","source":{"url":"https://x"}}]}`, "no `source.name`"},
-		{"trailing document", `{"vulnerabilities":[]}{"vulnerabilities":[]}`, "trailing content"},
-		{"empty file", "   \n", "is empty"},
-		{"not json", `this is not json`, "parse vulnerabilities file"},
+		{"unknown format", func(v map[string]string) { v["INPUT_VULNERABILITIES-FORMAT"] = "spdx" }, "must be one of native, trivy, grype, cyclonedx, sarif, osv-scanner, gitlab, snyk"},
+		{"producer with capitals", func(v map[string]string) { v["INPUT_VULNERABILITIES-PRODUCER"] = "Trivy" }, "`vulnerabilities-producer` must be"},
+		{"producer with a space", func(v map[string]string) { v["INPUT_VULNERABILITIES-PRODUCER"] = "image scan" }, "`vulnerabilities-producer` must be"},
+		{"producer too long", func(v map[string]string) { v["INPUT_VULNERABILITIES-PRODUCER"] = strings.Repeat("a", 65) }, "`vulnerabilities-producer` must be"},
+		{"producer version too long", func(v map[string]string) {
+			v["INPUT_VULNERABILITIES-PRODUCER-VERSION"] = strings.Repeat("é", 65)
+		}, "`vulnerabilities-producer-version` must be at most 64 characters, got 65"},
+		{"producer version with a line break", func(v map[string]string) {
+			v["INPUT_VULNERABILITIES-PRODUCER-VERSION"] = "0.58.1\n::add-mask::x"
+		}, "`vulnerabilities-producer-version` must not contain control characters"},
+		{"producer version with DEL", func(v map[string]string) { v["INPUT_VULNERABILITIES-PRODUCER-VERSION"] = "0.58\x7f" }, "must not contain control characters"},
+		{"missing report", func(v map[string]string) { v["INPUT_VULNERABILITIES-FILE"] = filepath.Join(t.TempDir(), "absent.json") }, "read vulnerabilities file"},
+		{"missing vex file", func(v map[string]string) { v["INPUT_VEX-FILE"] = filepath.Join(t.TempDir(), "absent.json") }, "read vex file"},
+		{"vex file not JSON", func(v map[string]string) { v["INPUT_VEX-FILE"] = writeReport(t, "<xml/>") }, "is not a JSON document"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := LoadVulnerabilities(writeReport(t, tc.content))
-			if err == nil {
-				t.Fatalf("LoadVulnerabilities succeeded, want an error mentioning %q", tc.want)
-			}
-			if !strings.Contains(err.Error(), tc.want) {
+			vars := uploadEnv(report)
+			tc.mutate(vars)
+			_, err := LoadConfig(getenvFrom(vars))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("error = %v, want it to mention %q", err, tc.want)
 			}
 		})
 	}
 }
 
-// The API caps one upload; catching it here means the run fails before the version is published rather than after.
-func TestLoadVulnerabilitiesRejectsAnOversizedReport(t *testing.T) {
-	entries := make([]string, afclient.MaxVulnerabilities+1)
-	for i := range entries {
-		entries[i] = fmt.Sprintf(`{"id":"CVE-%d","source":{"name":"NVD"}}`, i)
-	}
-	report := `{"vulnerabilities":[` + strings.Join(entries, ",") + `]}`
-
-	_, err := LoadVulnerabilities(writeReport(t, report))
-	if err == nil || !strings.Contains(err.Error(), "at most 5000") {
-		t.Fatalf("error = %v, want it to name the upload limit", err)
+// ArtefactFlow refuses a request over its limit, and it can only say so once the version exists. The size is knowable before, so it is checked before.
+func TestLoadConfigRejectsAReportOverTheLimit(t *testing.T) {
+	big := `{"vulnerabilities":[],"padding":"` + strings.Repeat("a", afclient.MaxImportBytes) + `"}`
+	_, err := LoadConfig(getenvFrom(uploadEnv(writeReport(t, big))))
+	if err == nil || !strings.Contains(err.Error(), "at most 32 MiB in one import") {
+		t.Errorf("error = %v, want the oversized report refused before anything is published", err)
 	}
 }
 
-func TestLoadVulnerabilitiesRejectsAMissingFile(t *testing.T) {
-	if _, err := LoadVulnerabilities(filepath.Join(t.TempDir(), "absent.json")); err == nil {
-		t.Fatal("LoadVulnerabilities succeeded on a missing file")
+// The API counts the version in characters, so a 64-character version in a non-ASCII script must not be refused for its byte length.
+func TestLoadConfigAcceptsAProducerVersionOfSixtyFourCharacters(t *testing.T) {
+	vars := uploadEnv(writeReport(t, `{"vulnerabilities":[]}`))
+	vars["ARTEFACTFLOW_VULNERABILITIES_PRODUCER_VERSION"] = strings.Repeat("é", 64)
+	if got := loadFrom(t, vars).Import.ProducerVersion; got != strings.Repeat("é", 64) {
+		t.Errorf("producer version = %q, want it read from ARTEFACTFLOW_VULNERABILITIES_PRODUCER_VERSION", got)
 	}
 }
 
-// The example the README points readers at has to be a report the action actually accepts.
-func TestDocumentedExampleParses(t *testing.T) {
-	in, err := LoadVulnerabilities(filepath.Join("..", "..", "examples", "vulnerabilities.json"))
-	if err != nil {
-		t.Fatalf("the example shipped in the repository must parse: %v", err)
+// The size is checked from the file system before anything is read, so an 80 MB report is refused without being loaded. A sparse file is over the limit by its size while holding nothing, so if it were read first it would fail as empty instead: the size message proves the read never happened.
+func TestLoadConfigRefusesAnOversizedReportBeforeReadingIt(t *testing.T) {
+	report := filepath.Join(t.TempDir(), "huge.json")
+	if err := os.WriteFile(report, nil, 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if len(in.Vulnerabilities) != 2 {
-		t.Fatalf("example has %d findings, want 2", len(in.Vulnerabilities))
+	if err := os.Truncate(report, afclient.MaxImportBytes); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadConfig(getenvFrom(uploadEnv(report)))
+	if err == nil || !strings.Contains(err.Error(), "at most 32 MiB in one import") {
+		t.Fatalf("error = %v, want the oversized report refused by its size", err)
+	}
+	if strings.Contains(err.Error(), "is empty") || strings.Contains(err.Error(), "not a JSON document") {
+		t.Errorf("error = %v, want the file refused before it was read", err)
+	}
+}
+
+// The limit covers both files together: a report under it with a VEX document that takes it over is refused too, before either is read.
+func TestLoadConfigCountsTheVEXFileTowardsTheLimit(t *testing.T) {
+	vex := filepath.Join(t.TempDir(), "vex.json")
+	if err := os.WriteFile(vex, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(vex, afclient.MaxImportBytes-64<<10); err != nil {
+		t.Fatal(err)
+	}
+	vars := uploadEnv(writeReport(t, `{"SchemaVersion":2,"Results":[]}`))
+	vars["INPUT_VEX-FILE"] = vex
+	if _, err := LoadConfig(getenvFrom(vars)); err == nil || !strings.Contains(err.Error(), "the vulnerabilities file and vex file are") {
+		t.Errorf("error = %v, want the two files refused by their combined size", err)
+	}
+}
+
+func TestLoadConfigVEXWithoutAScanIsAnError(t *testing.T) {
+	vars := validEnv()
+	vars["INPUT_VEX-FILE"] = writeReport(t, `{}`)
+	if _, err := LoadConfig(getenvFrom(vars)); err == nil || !strings.Contains(err.Error(), "needs a scan to overlay onto") {
+		t.Errorf("error = %v, want a VEX file without a scan named as a misconfiguration", err)
+	}
+}
+
+func TestWriteConvertedOutputRejectsAnAnswerThatIsNotADocument(t *testing.T) {
+	if err := WriteConvertedOutput(filepath.Join(t.TempDir(), "out.json"), []byte(`[1,2]`)); err == nil {
+		t.Error("WriteConvertedOutput accepted an answer that is not a document")
+	}
+}
+
+// The examples the README links to have to be usable as they stand.
+func TestDocumentedExamplesAreJSON(t *testing.T) {
+	for _, name := range []string{"vulnerabilities.json", "trivy-report.json", "vex.json"} {
+		if _, err := readJSONFile("example", filepath.Join("..", "..", "examples", name)); err != nil {
+			t.Errorf("examples/%s: %v", name, err)
+		}
 	}
 }
