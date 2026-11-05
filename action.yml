@@ -125,4 +125,4 @@ runs:
   # One exact, immutable image version, published by the release workflow and bumped as part of cutting each release.
   #
   # Exact, not a floating `:1`. A consumer who pins `uses: ...@v1.2.0` or a commit SHA expects to keep running that code; a floating tag would silently hand them a newer image and make pinning meaningless. The release workflow refuses to publish if this reference and the release tag disagree.
-  image: 'docker://ghcr.io/artefactflow/publish-version-action:1.0.1'
+  image: 'docker://ghcr.io/artefactflow/publish-version-action:1.1.1'
