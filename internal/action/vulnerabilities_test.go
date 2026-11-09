@@ -3,6 +3,7 @@ package action
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -55,6 +56,22 @@ func TestLoadConfigLeavesFormatAndProducerToTheAPIByDefault(t *testing.T) {
 	}
 }
 
+// Every format the import reads can be forced, in any case: refusing one here would fail the step before ArtefactFlow ever saw the report.
+func TestLoadConfigAcceptsEveryReportFormatAsAnOverride(t *testing.T) {
+	if !slices.Contains(afclient.ReportFormats, "dependency-check") {
+		t.Fatalf("ReportFormats = %v, want dependency-check among them", afclient.ReportFormats)
+	}
+	for _, format := range afclient.ReportFormats {
+		t.Run(format, func(t *testing.T) {
+			vars := uploadEnv(writeReport(t, `{"vulnerabilities":[]}`))
+			vars["INPUT_VULNERABILITIES-FORMAT"] = strings.ToUpper(format)
+			if got := loadFrom(t, vars).Import.Format; got != format {
+				t.Errorf("format = %q, want %q", got, format)
+			}
+		})
+	}
+}
+
 func TestLoadConfigRejectsUnusableImportInputs(t *testing.T) {
 	report := writeReport(t, `{"vulnerabilities":[]}`)
 	tests := []struct {
@@ -62,7 +79,7 @@ func TestLoadConfigRejectsUnusableImportInputs(t *testing.T) {
 		mutate func(map[string]string)
 		want   string
 	}{
-		{"unknown format", func(v map[string]string) { v["INPUT_VULNERABILITIES-FORMAT"] = "spdx" }, "must be one of native, trivy, grype, cyclonedx, sarif, osv-scanner, gitlab, snyk"},
+		{"unknown format", func(v map[string]string) { v["INPUT_VULNERABILITIES-FORMAT"] = "spdx" }, "must be one of native, trivy, grype, cyclonedx, sarif, osv-scanner, gitlab, snyk, dependency-check"},
 		{"producer with capitals", func(v map[string]string) { v["INPUT_VULNERABILITIES-PRODUCER"] = "Trivy" }, "`vulnerabilities-producer` must be"},
 		{"producer with a space", func(v map[string]string) { v["INPUT_VULNERABILITIES-PRODUCER"] = "image scan" }, "`vulnerabilities-producer` must be"},
 		{"producer too long", func(v map[string]string) { v["INPUT_VULNERABILITIES-PRODUCER"] = strings.Repeat("a", 65) }, "`vulnerabilities-producer` must be"},

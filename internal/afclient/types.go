@@ -81,12 +81,12 @@ type Version struct {
 }
 
 // ReportFormats are the report formats the import endpoint reads, in the spelling its `format` parameter takes. The format is detected from the document; naming one only forces it, and a document that does not match is refused.
-var ReportFormats = []string{"native", "trivy", "grype", "cyclonedx", "sarif", "osv-scanner", "gitlab", "snyk"}
+var ReportFormats = []string{"native", "trivy", "grype", "cyclonedx", "sarif", "osv-scanner", "gitlab", "snyk", "dependency-check"}
 
 // MaxImportBytes is the largest request the import endpoint accepts, the report and any VEX document together. The action checks the files against it before anything is published, so an oversized report fails before the version is created rather than after.
 const MaxImportBytes = 32 << 20
 
-// ImportRequest is one scanner report to record on a version, with an optional CycloneDX VEX document laid over it. The files travel as they were written: ArtefactFlow detects the format and converts the report itself.
+// ImportRequest is one scanner report to record on a version, with an optional VEX document (CycloneDX VEX or OpenVEX) laid over it. The files travel as they were written: ArtefactFlow detects the format and converts the report itself.
 type ImportRequest struct {
 	// Report is the report's content and ReportName its file name, sent as the part's filename so a refusal can name it.
 	Report     []byte

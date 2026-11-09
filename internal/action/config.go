@@ -54,7 +54,7 @@ type Config struct {
 	// Import is the report to import, read here rather than after the version is created, so a missing, empty, unparseable or oversized file fails before anything is published. Converting it is ArtefactFlow's job: the files travel as they were written.
 	Import afclient.ImportRequest
 
-	// VEXFile is the CycloneDX VEX document supplied alongside a scan report, laid over its findings by the import.
+	// VEXFile is the VEX document (CycloneDX VEX or OpenVEX) supplied alongside a scan report, laid over its findings by the import.
 	VEXFile string
 
 	// ConvertedOutputFile, when set, receives the ArtefactFlow-format document the report converts to, so a workflow can inspect or archive what was recorded.

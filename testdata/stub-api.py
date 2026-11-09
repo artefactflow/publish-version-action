@@ -17,9 +17,11 @@ It does not convert reports: that is ArtefactFlow's job, tested there. It only
 recognises a report's format and lists the identifiers in it, which is enough
 for the action's own behaviour (the dry run, the converted file, the summary in
 the step log) to be exercised. It recognises Trivy, Grype, CycloneDX and native
-reports only; a SARIF, OSV-Scanner, GitLab or Snyk report is refused here even
-though ArtefactFlow reads it. Like ArtefactFlow it refuses a VEX document sent
-beside a native report, and it echoes `producer` and `producer_version`.
+reports only; a SARIF, OSV-Scanner, GitLab, Snyk or Dependency-Check report is
+refused here even though ArtefactFlow reads it. Like ArtefactFlow it refuses a
+VEX document sent beside a native report, and it echoes `producer` and
+`producer_version`. It matches the assessments of a CycloneDX VEX only; an
+OpenVEX document is accepted but matches nothing here.
 
 It never answers 413 or 429: the size limit and the import gate's
 `Retry-After` are covered by the Go unit tests, not by the smoke test.
