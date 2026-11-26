@@ -41,7 +41,7 @@ That records `1.4.2` with the commit, branch, run id and run number of the workf
 | `build-id` | no | the workflow run id | `ARTEFACTFLOW_BUILD_ID` | Identifier of the build |
 | `pipeline-id` | no | the workflow run number | `ARTEFACTFLOW_PIPELINE_ID` | Identifier of the pipeline |
 | `lifecycle` | no | none | `ARTEFACTFLOW_LIFECYCLE` | One of `pre-alpha`, `alpha`, `beta`, `release`, `end-of-life` |
-| `build-state` | no | none | `ARTEFACTFLOW_BUILD_STATE` | One of `pending`, `building`, `success`, `failed`, `cancelled` |
+| `build-state` | no | `success` | `ARTEFACTFLOW_BUILD_STATE` | One of `pending`, `building`, `success`, `failed`, `cancelled`. The action runs after the build it records, so it records `success` unless you say otherwise |
 | `is-default` | no | `true` | `ARTEFACTFLOW_IS_DEFAULT` | Mark this version as the artefact's default |
 | `note` | no | none | `ARTEFACTFLOW_NOTE` | Free-text note, at most 4096 characters |
 | `bom-ref` | no | none | `ARTEFACTFLOW_BOM_REF` | CycloneDX `bom-ref` for this version |

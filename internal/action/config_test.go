@@ -159,10 +159,10 @@ func TestUnsetOptionalFieldsAreOmitted(t *testing.T) {
 	v := loadFrom(t, validEnv()).Version
 	// An unset optional field must be absent from the request body, not sent as an empty string that would overwrite a meaningful server-side value.
 	for name, got := range map[string]string{
-		"note":        v.Note,
-		"bom_ref":     v.BOMRef,
-		"lifecycle":   v.Lifecycle,
-		"build_state": v.BuildState,
+		"note":            v.Note,
+		"bom_ref":         v.BOMRef,
+		"lifecycle":       v.Lifecycle,
+		"build_timestamp": v.BuildTimestamp,
 	} {
 		if got != "" {
 			t.Errorf("%s = %q, want empty so it is omitted from the request body", name, got)
@@ -170,6 +170,19 @@ func TestUnsetOptionalFieldsAreOmitted(t *testing.T) {
 	}
 	if v.Hash != nil {
 		t.Errorf("hash = %+v, want nil when no digests were supplied", v.Hash)
+	}
+}
+
+func TestBuildStateDefaultsToSuccess(t *testing.T) {
+	// The action runs after the build it records. Leaving build_state out would have the API record `pending`, so every version would look unfinished.
+	if got := loadFrom(t, validEnv()).Version.BuildState; got != "success" {
+		t.Errorf("build_state = %q, want %q when the input is unset", got, "success")
+	}
+
+	vars := validEnv()
+	vars["INPUT_BUILD-STATE"] = "failed"
+	if got := loadFrom(t, vars).Version.BuildState; got != "failed" {
+		t.Errorf("build_state = %q, want the explicit input to win over the default", got)
 	}
 }
 

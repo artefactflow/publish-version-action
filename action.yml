@@ -43,7 +43,7 @@ inputs:
     description: 'Where the version sits in its life: pre-alpha, alpha, beta, release, or end-of-life. Environment variable: ARTEFACTFLOW_LIFECYCLE.'
     required: false
   build-state:
-    description: 'Outcome of the build: pending, building, success, failed, or cancelled. Environment variable: ARTEFACTFLOW_BUILD_STATE.'
+    description: 'Outcome of the build: pending, building, success, failed, or cancelled. Defaults to success, since the action runs after the build it records. Environment variable: ARTEFACTFLOW_BUILD_STATE.'
     required: false
   is-default:
     description: "Mark this version as the artefact's default, the one shown and resolved first. Defaults to true. Environment variable: ARTEFACTFLOW_IS_DEFAULT."

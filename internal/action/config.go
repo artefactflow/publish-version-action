@@ -21,6 +21,9 @@ const DefaultAPIURL = "https://api.artefactflow.app"
 // Builder is recorded on every version this action creates, identifying what produced the build.
 const Builder = "github-actions"
 
+// DefaultBuildState is recorded when the workflow sets no `build-state`. The action runs after the build it records, so an unset state is a build that succeeded. Left out of the request, the API would record `pending`, which leaves every published version looking unfinished. The GitLab CI component records `success` in the same situation.
+const DefaultBuildState = "success"
+
 // IfExists selects what happens when the version already exists on the artefact.
 type IfExists string
 
@@ -208,7 +211,10 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		fail("input `lifecycle` must be one of %s, got %q", strings.Join(afclient.Lifecycles, ", "), lifecycle)
 	}
 	buildState := strings.ToLower(input("build-state"))
-	if buildState != "" && !slices.Contains(afclient.BuildStates, buildState) {
+	switch {
+	case buildState == "":
+		buildState = DefaultBuildState
+	case !slices.Contains(afclient.BuildStates, buildState):
 		fail("input `build-state` must be one of %s, got %q", strings.Join(afclient.BuildStates, ", "), buildState)
 	}
 
